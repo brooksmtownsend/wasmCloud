@@ -4,6 +4,14 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+    inputs:
+      crate:
+        type: choice
+        description: crate to smart-release
+        options:
+          - N/A
+          - wasmcloud-core
+          - wasmcloud-control-interface
   push:
     branches:
       - main
@@ -655,3 +663,29 @@ jobs:
         continue-on-error: ${{ github.repository_owner != 'wasmCloud' }}
         run: cargo publish --token ${{ secrets.CRATES_PUBLISH_TOKEN }}
         working-directory: ./crates/${{ matrix.crate }}
+
+  smart-release:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+      - name: Install cmake for smart-release
+        run: sudo apt update && sudo apt install cmake -y
+      - name: install smart-release
+        env:
+          RUSTFLAGS: ''
+        run: cargo install cargo-smart-release --git https://github.com/brooksmtownsend/cargo-smart-release --branch feat/update-workspace-dependencies
+      - name: try release
+        run: |
+          # TODO: obv remove
+          # git config --global user.email "you@example.com"
+          # git config --global user.name "Your Name"
+          # TODO: configurable push / dirty
+          cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview --allow-dirty --no-push ${{ inputs.crate }}
+          git status
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
