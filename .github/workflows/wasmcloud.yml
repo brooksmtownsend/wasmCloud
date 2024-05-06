@@ -13,7 +13,7 @@ on:
           - wasmcloud-control-interface
       execute:
         type: boolean
-        description: to release or not to release
+        description: release
   push:
     branches:
       - main
@@ -685,20 +685,20 @@ jobs:
           RUSTFLAGS: ''
         run: cargo install cargo-smart-release --git https://github.com/brooksmtownsend/cargo-smart-release --branch feat/update-workspace-dependencies
       - name: dry run release
-        if: ${{ !github.event.inputs.execute }}
+        if: ${{ !inputs.execute }}
         run: |
           git config --global user.email "you@example.com"
           git config --global user.name "Your Name"
           cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview --no-push ${{ inputs.crate }}
       - name: Create Pull Request
-        if: ${{ !github.event.inputs.execute }}
+        if: ${{ !inputs.execute }}
         uses: peter-evans/create-pull-request@v6
         with:
           signoff: true
           title: Release ${{ inputs.crate }}
 
       - name: release
-        if: ${{ github.event.inputs.execute }}
+        if: ${{ inputs.execute }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
