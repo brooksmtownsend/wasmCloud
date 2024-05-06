@@ -680,10 +680,7 @@ jobs:
         run: cargo install cargo-smart-release --git https://github.com/brooksmtownsend/cargo-smart-release --branch feat/update-workspace-dependencies
       - name: try release
         run: |
-          # TODO: obv remove
-          # git config --global user.email "you@example.com"
-          # git config --global user.name "Your Name"
-          # TODO: configurable push / dirty
+          ls -lah
           cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview --allow-dirty --no-push ${{ inputs.crate }}
           git status
 
