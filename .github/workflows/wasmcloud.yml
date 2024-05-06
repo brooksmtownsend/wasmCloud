@@ -693,6 +693,9 @@ jobs:
       - name: Create Pull Request
         if: ${{ !github.event.inputs.execute }}
         uses: peter-evans/create-pull-request@v6
+        with:
+          signoff: true
+          title: Release ${{ inputs.crate }}
 
       - name: release
         if: ${{ github.event.inputs.execute }}
