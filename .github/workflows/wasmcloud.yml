@@ -696,6 +696,7 @@ jobs:
         with:
           signoff: true
           title: Release ${{ inputs.crate }}
+          commit-message: 'release(${{ inputs.crate }}): release and update CHANGELOG'
 
       - name: release
         if: ${{ inputs.execute }}
