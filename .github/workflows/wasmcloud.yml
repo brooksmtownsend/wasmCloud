@@ -9,9 +9,11 @@ on:
         type: choice
         description: crate to smart-release
         options:
-          - N/A
           - wasmcloud-core
           - wasmcloud-control-interface
+      execute:
+        type: boolean
+        description: to release or not to release
   push:
     branches:
       - main
@@ -677,16 +679,26 @@ jobs:
           cache: true
       - name: Install cmake for smart-release
         run: sudo apt update && sudo apt install cmake -y
+
       - name: install smart-release
         env:
           RUSTFLAGS: ''
         run: cargo install cargo-smart-release --git https://github.com/brooksmtownsend/cargo-smart-release --branch feat/update-workspace-dependencies
-      - name: try release
+      - name: dry run release
+        if: ${{ !github.event.inputs.execute }}
         run: |
           git config --global user.email "you@example.com"
           git config --global user.name "Your Name"
-          cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview --allow-dirty --no-push ${{ inputs.crate }}
-          git status
-
+          cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview --no-push ${{ inputs.crate }}
       - name: Create Pull Request
+        if: ${{ !github.event.inputs.execute }}
         uses: peter-evans/create-pull-request@v6
+
+      - name: release
+        if: ${{ github.event.inputs.execute }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+          cargo smart-release --update-crates-index --no-publish --execute --no-changelog-preview ${{ inputs.crate }}
