@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-6abbcac954a9834d871ea69b8a40bd79d258c0f1/>
 <csr-id-642874717b6aab760d4692f9e8b12803548314e2/>
 <csr-id-0f03f1f91210a4ed3fa64a4b07aebe8e56627ea6/>
+<csr-id-4e0313ae4cfb5cbb2d3fa0320c662466a7082c0e/>
 
 ### Chore
 
@@ -183,7 +184,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 48 commits contributed to the release over the course of 252 calendar days.
+ - 49 commits contributed to the release over the course of 252 calendar days.
  - 47 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 0 issues like '(#ID)' were seen in commit messages
 
@@ -194,6 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <details><summary>view details</summary>
 
  * **Uncategorized**
+    - Bump wascap v0.15.0, wasmcloud-core v0.6.0, safety bump 7 crates ([`586047b`](https://github.com/brooksmtownsend/wasmCloud/commit/586047b5bf71612827870d88cad29e50929ac49e))
     - Generate changelogs after 1.0.1 release ([`4e0313a`](https://github.com/brooksmtownsend/wasmCloud/commit/4e0313ae4cfb5cbb2d3fa0320c662466a7082c0e))
     - Updated with newest features ([`0f03f1f`](https://github.com/brooksmtownsend/wasmCloud/commit/0f03f1f91210a4ed3fa64a4b07aebe8e56627ea6))
     - Generate crate changelogs ([`f986e39`](https://github.com/brooksmtownsend/wasmCloud/commit/f986e39450676dc598b92f13cb6e52b9c3200c0b))

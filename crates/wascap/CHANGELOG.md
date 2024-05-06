@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## v0.15.0 (2024-05-06)
 
+<csr-id-857c9757ebaa5b835a564be5c70ac3466c01c0ca/>
+<csr-id-1bad246d9e174384c1a09bdff7e2dc88d911792e/>
+<csr-id-36f0b18737f244d3f946faf8a14626dba619b931/>
+<csr-id-9c8abf3dd1a942f01a70432abb2fb9cfc4d48914/>
+<csr-id-ee9d552c7ea1c017d8aa646f64002a85ffebefb8/>
+<csr-id-9de9ae3de8799661525b2458303e72cd24cd666f/>
+<csr-id-0b59721367d138709b58fa241cdadd4f585203ac/>
+<csr-id-f5459155f3b96aa67742a8c62eb286cc06885855/>
+<csr-id-171214d4bcffddb9a2a37c2a13fcbed1ec43fd31/>
+
 ### Chore
 
  - <csr-id-857c9757ebaa5b835a564be5c70ac3466c01c0ca/> bump to 0.14.0
@@ -79,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 18 commits contributed to the release over the course of 201 calendar days.
+ - 20 commits contributed to the release over the course of 201 calendar days.
  - 16 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 0 issues like '(#ID)' were seen in commit messages
 
@@ -90,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <details><summary>view details</summary>
 
  * **Uncategorized**
+    - [create-pull-request] automated change ([`47fa941`](https://github.com/brooksmtownsend/wasmCloud/commit/47fa94143e6720709685b3b3eee7c6b0e7f0ccd2))
+    - Bump wascap v0.15.0, wasmcloud-core v0.6.0, safety bump 7 crates ([`586047b`](https://github.com/brooksmtownsend/wasmCloud/commit/586047b5bf71612827870d88cad29e50929ac49e))
     - Bump to 0.14.0 ([`857c975`](https://github.com/brooksmtownsend/wasmCloud/commit/857c9757ebaa5b835a564be5c70ac3466c01c0ca))
     - Remove usage of capability signing ([`93748a1`](https://github.com/brooksmtownsend/wasmCloud/commit/93748a1ecd4edd785af257952f1de9497a7ea946))
     - Remove capabilities ([`3c56e8f`](https://github.com/brooksmtownsend/wasmCloud/commit/3c56e8f18e7e40982c59ee911140cd5965c733f5))
