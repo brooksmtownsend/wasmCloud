@@ -1,0 +1,31 @@
+name: wash
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit_tests:
+    name: See if wash downloads bin
+    runs-on: macos-11
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "${{ matrix.os }}-shared-cache"
+      - name: Install wash
+        run: brew install wasmcloud/wasmcloud/wash
+
+      - name: download things
+        run: |
+          wash up -d
+          sleep 60;
+
+      - name: See what got downloaded
+        run: |
+          file $(which wash)
+          file ~/.wash/downloads/nats-server
+          file ~/.wash/downloads/wadm
+          file ~/.wash/downloads/v1.0.2/wasmcloud_host
