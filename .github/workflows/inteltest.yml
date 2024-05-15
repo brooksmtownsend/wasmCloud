@@ -1,4 +1,4 @@
-name: wash
+name: intelmacdown
 
 on:
   push:
@@ -19,6 +19,8 @@ jobs:
         run: brew install wasmcloud/wasmcloud/wash
 
       - name: download things
+        env:
+          RUST_LOG: trace
         run: |
           wash up -d
           sleep 60;
