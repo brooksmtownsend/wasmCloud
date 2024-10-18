@@ -9,4 +9,10 @@ version = "0.1.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.32"
+waki = "0.3.2"
+wasi = { version = "0.13.3", features = ["std"] }
+wasmcloud-component = { path = "../../../../crates/component" }
+
+[patch.crates-io]
+url = { path = "/Users/brooks/github.com/servo/rust-url/url" }
+form_urlencoded = { path = "/Users/brooks/github.com/servo/rust-url/form_urlencoded" }

@@ -1,25 +1,16 @@
-wit_bindgen::generate!({
-    generate_all
-});
+use wasmcloud_component::http::{HttpServer, Request, Response, ResponseBuilder};
+use wasmcloud_component::wasi::http::types::ErrorCode;
 
-use exports::wasi::http::incoming_handler::Guest;
-use wasi::http::types::*;
+wasmcloud_component::http::export!(Component);
 
-struct HttpServer;
+struct Component;
 
-impl Guest for HttpServer {
-    fn handle(_request: IncomingRequest, response_out: ResponseOutparam) {
-        let response = OutgoingResponse::new(Fields::new());
-        response.set_status_code(200).unwrap();
-        let response_body = response.body().unwrap();
-        ResponseOutparam::set(response_out, Ok(response));
-        response_body
-            .write()
-            .unwrap()
-            .blocking_write_and_flush(b"Hello from Rust!\n")
-            .unwrap();
-        OutgoingBody::finish(response_body, None).expect("failed to finish response body");
+impl HttpServer for Component {
+    fn handle(_request: Request) -> Result<Response, ErrorCode> {
+        Ok(Response::ok("Hello from Rust!"))
+        // Ok(ResponseBuilder::new()
+        //     .status_code(400)
+        //     .body("Bad request............ awkward.")
+        //     .build())
     }
 }
-
-export!(HttpServer);
