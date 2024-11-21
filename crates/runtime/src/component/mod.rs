@@ -482,7 +482,7 @@ where
     /// A [`WrpcServeEvent`] containing the incoming [`wrpc_transport::Serve::Context`] will be sent
     /// on completion of each invocation.
     /// The supplied [`Handler`] will be used to satisfy imports.
-    #[instrument(level = "debug", skip_all)]
+    // #[instrument(level = "debug", skip_all)]
     pub async fn serve_wrpc<S>(
         &self,
         srv: &S,
@@ -492,7 +492,7 @@ where
     where
         S: wrpc_transport::Serve,
     {
-        let span = Span::current();
+        // let span = Span::current();
         let max_execution_time = self.max_execution_time;
         let mut invocations = vec![];
         let instance = Instance {
@@ -517,6 +517,7 @@ where
                         srv,
                         wrpc_interface_http::ServeWasmtime(instance),
                     )
+                    .instrument(tracing::debug_span!("wasi_http_incoming_handler"))
                     .await
                     .context("failed to serve `wrpc:http/incoming-handler`")?;
                     invocations.push(handle);
@@ -550,7 +551,7 @@ where
                         .await
                         .context("failed to serve root function")?;
                     let events = events.clone();
-                    let span = span.clone();
+                    // let span = span.clone();
                     invocations.push(Box::pin(func.map_ok(move |(cx, res)| {
                         let events = events.clone();
                         Box::pin(
@@ -569,8 +570,7 @@ where
                                     );
                                 }
                                 res
-                            }
-                            .instrument(span.clone()),
+                            }, // .instrument(span.clone()),
                         )
                             as Pin<Box<dyn Future<Output = _> + Send + 'static>>
                     })));
@@ -605,7 +605,7 @@ where
                                     .await
                                     .context("failed to serve instance function")?;
                                 let events = events.clone();
-                                let span = span.clone();
+                                // let span = span.clone();
                                 invocations.push(Box::pin(func.map_ok(move |(cx, res)| {
                                     let events = events.clone();
                                     Box::pin(
@@ -626,7 +626,7 @@ where
                                             }
                                             res
                                         }
-                                        .instrument(span.clone()),
+                                        // .instrument(span.clone()),
                                     )
                                         as Pin<Box<dyn Future<Output = _> + Send + 'static>>
                                 })));

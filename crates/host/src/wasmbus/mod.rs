@@ -32,7 +32,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval_at, Instant};
 use tokio::{process, select, spawn};
 use tokio_stream::wrappers::IntervalStream;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tracing::{
+    debug, debug_span, error, info, instrument, trace, trace_span, warn, Instrument as _,
+};
 use uuid::Uuid;
 use wascap::{jwt, prelude::ClaimsBuilder};
 use wasmcloud_control_interface::{
@@ -239,7 +241,12 @@ impl wrpc_transport::Serve for WrpcServer {
             + 'static,
     > {
         debug!("serving invocations");
-        let invocations = self.nats.serve(instance, func, paths).await?;
+        // TODO: bad bad?
+        let invocations = self
+            .nats
+            .serve(instance, func, paths)
+            .instrument(debug_span!("beeg_nats_serve"))
+            .await?;
 
         let func: Arc<str> = Arc::from(func);
         let instance: Arc<str> = Arc::from(instance);
@@ -1246,6 +1253,7 @@ impl Host {
                 handler.clone(),
                 events_tx,
             )
+            // .instrument(debug_span!("serve_wrpc_manual_whatever"))
             .await?;
         let permits = Arc::new(Semaphore::new(
             usize::from(max_instances).min(Semaphore::MAX_PERMITS),
@@ -1257,74 +1265,111 @@ impl Host {
             handler,
             exports: spawn(
                 async move {
-                    join!(
-                        async move {
-                            let mut tasks = JoinSet::new();
-                            let mut exports = stream::select_all(exports);
-                            loop {
-                                let permits = Arc::clone(&permits);
-                                select! {
-                                    Some(fut) = exports.next() => {
-                                        match fut {
-                                            Ok(fut) => {
-                                                debug!("accepted invocation, acquiring permit");
-                                                let permit = permits.acquire_owned().await;
-                                                tasks.spawn(async move {
-                                                    let _permit = permit;
-                                                    debug!("handling invocation");
-                                                    match fut.await {
-                                                        Ok(()) => {
-                                                            debug!("successfully handled invocation");
-                                                            Ok(())
-                                                        },
-                                                        Err(err) => {
-                                                            warn!(?err, "failed to handle invocation");
-                                                            Err(err)
-                                                        },
-                                                    }
-                                                });
-                                            }
-                                            Err(err) => {
-                                                warn!(?err, "failed to accept invocation")
+                    let mut exports = stream::select_all(exports);
+                    let permits = Arc::clone(&permits);
+                    loop {
+                        let permits = Arc::clone(&permits);
+                        if let Some(fut) =
+                            exports.next().instrument(debug_span!("aaaaa_export")).await
+                        {
+                            match fut {
+                                Ok(fut) => {
+                                    debug!("accepted invocation, acquiring permit");
+                                    let permit = permits
+                                        .acquire_owned()
+                                        .instrument(debug_span!("acquire_semaphore"))
+                                        .await;
+                                    spawn(
+                                        async move {
+                                            let _permit = permit;
+                                            debug!("handling invocation");
+                                            match fut
+                                                .instrument(debug_span!("aaaaa_awaiting_fut"))
+                                                .await
+                                            {
+                                                Ok(()) => {
+                                                    debug!("successfully handled invocation");
+                                                    Ok(())
+                                                }
+                                                Err(err) => {
+                                                    warn!(?err, "failed to handle invocation");
+                                                    Err(err)
+                                                }
                                             }
                                         }
-                                    }
-                                    Some(res) = tasks.join_next() => {
-                                        if let Err(err) = res {
-                                            error!(?err, "export serving task failed");
-                                        }
-                                    }
+                                        .instrument(debug_span!("aaaaa_actual_handling_fut")),
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(?err, "failed to accept invocation")
                                 }
                             }
-                        },
-                        async move {
-                            while let Some(evt) = events_rx.recv().await {
-                                match evt {
-                                    WrpcServeEvent::HttpIncomingHandlerHandleReturned {
-                                        context: (start_at, ref attributes),
-                                        success,
-                                    }
-                                    | WrpcServeEvent::MessagingHandlerHandleMessageReturned {
-                                        context: (start_at, ref attributes),
-                                        success,
-                                    }
-                                    | WrpcServeEvent::DynamicExportReturned {
-                                        context: (start_at, ref attributes),
-                                        success,
-                                    } => metrics.record_component_invocation(
-                                        u64::try_from(start_at.elapsed().as_nanos())
-                                            .unwrap_or_default(),
-                                        attributes,
-                                        !success,
-                                    ),
-                                }
-                            }
-                            debug!("serving event stream is done");
-                        },
-                    );
-                    debug!("export serving task done");
-                }
-                .in_current_span(),
+                        }
+                    }
+                    // join!(
+                    // TODO: things in here get attached above
+                    // async move {
+                    //     let mut tasks = JoinSet::new();
+                    //     let mut exports = stream::select_all(exports);
+                    //     loop {
+                    //         // select! {
+                    //         if let Some(res) = tasks
+                    //             .join_next()
+                    //             .instrument(debug_span!("aaaaa_join_next"))
+                    //             .await
+                    //         {
+                    //             if let Err(err) = res {
+                    //                 error!(?err, "export serving task failed");
+                    //             }
+                    //         }
+
+                    //         if let Some(res) = tasks
+                    //             .join_next()
+                    //             .instrument(debug_span!("aaaaa_join_next"))
+                    //             .await
+                    //         {
+                    //             if let Err(err) = res {
+                    //                 error!(?err, "export serving task failed");
+                    //             }
+                    //         }
+                    //     }
+                    // }
+                    // .instrument(debug_span!("aaaa_export_serve"))
+                    // .await;
+                    // TODO: Task here
+                    // async move {
+                    //     while let Some(evt) = events_rx
+                    //         .recv()
+                    //         .instrument(debug_span!("aaaa_internal_evt"))
+                    //         .await
+                    //     {
+                    //         match evt {
+                    //             WrpcServeEvent::HttpIncomingHandlerHandleReturned {
+                    //                 context: (start_at, ref attributes),
+                    //                 success,
+                    //             }
+                    //             | WrpcServeEvent::MessagingHandlerHandleMessageReturned {
+                    //                 context: (start_at, ref attributes),
+                    //                 success,
+                    //             }
+                    //             | WrpcServeEvent::DynamicExportReturned {
+                    //                 context: (start_at, ref attributes),
+                    //                 success,
+                    //             } => metrics.record_component_invocation(
+                    //                 u64::try_from(start_at.elapsed().as_nanos())
+                    //                     .unwrap_or_default(),
+                    //                 attributes,
+                    //                 !success,
+                    //             ),
+                    //         }
+                    //     }
+                    //     debug!("serving event stream is done");
+                    // }
+                    // .instrument(debug_span!("aaaa_event_receiver"))
+                    // .await;
+                    // );
+                    // debug!("export serving task done");
+                }, // .instrument(debug_span!("aaaa_the_whole_thing")),
             ),
             annotations: annotations.clone(),
             max_instances,
@@ -1708,7 +1753,7 @@ impl Host {
                     error!(%component_ref, %component_id, err = ?e, "failed to update component after scale");
                 }
             }
-        });
+        }.instrument(debug_span!("scale_component_task")));
 
         Ok(CtlResponse::<()>::success(message))
     }
@@ -1740,6 +1785,7 @@ impl Host {
                 annotations,
                 claims.as_ref(),
             )
+            .instrument(trace_span!("start_component_policy_eval"))
             .await?
         {
             PolicyResponse {
