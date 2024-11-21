@@ -1255,9 +1255,9 @@ impl Host {
             )
             // .instrument(debug_span!("serve_wrpc_manual_whatever"))
             .await?;
-        let permits = Arc::new(Semaphore::new(
-            usize::from(max_instances).min(Semaphore::MAX_PERMITS),
-        ));
+        // let permits = Arc::new(Semaphore::new(
+        //     usize::from(max_instances).min(Semaphore::MAX_PERMITS),
+        // ));
         let metrics = Arc::clone(&self.metrics);
         Ok(Arc::new(Component {
             component,
@@ -1266,22 +1266,22 @@ impl Host {
             exports: spawn(
                 async move {
                     let mut exports = stream::select_all(exports);
-                    let permits = Arc::clone(&permits);
+                    // let permits = Arc::clone(&permits);
                     loop {
-                        let permits = Arc::clone(&permits);
+                        // let permits = Arc::clone(&permits);
                         if let Some(fut) =
                             exports.next().instrument(debug_span!("aaaaa_export")).await
                         {
                             match fut {
                                 Ok(fut) => {
                                     debug!("accepted invocation, acquiring permit");
-                                    let permit = permits
-                                        .acquire_owned()
-                                        .instrument(debug_span!("acquire_semaphore"))
-                                        .await;
+                                    // let permit = permits
+                                    //     .acquire_owned()
+                                    //     .instrument(debug_span!("acquire_semaphore"))
+                                    //     .await;
                                     spawn(
                                         async move {
-                                            let _permit = permit;
+                                            // let _permit = permit;
                                             debug!("handling invocation");
                                             match fut
                                                 .instrument(debug_span!("aaaaa_awaiting_fut"))
