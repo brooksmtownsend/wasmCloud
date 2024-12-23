@@ -23,7 +23,7 @@ jobs:
   should_run:
     runs-on: ubuntu-latest
     outputs:
-      modified: ${{ steps.changes.outputs.wash == 'true' }}
+      modified: ${{ steps.changes.outputs.wash }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dorny/paths-filter@v3
@@ -31,7 +31,6 @@ jobs:
         with:
           filters: |
             wash:
-              - '.github/workflows/wash.yml'
               - 'Cargo.lock'
               - 'Cargo.toml'
               - 'crates/control-interface/**'
@@ -42,7 +41,7 @@ jobs:
 
   unit_tests:
     needs: [should_run]
-    if: ${{ needs.should_run.outputs.modified }}
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: Unit Tests
     strategy:
       fail-fast: false # Ensure we can run the full suite even if one OS fails
@@ -83,7 +82,7 @@ jobs:
 
   integration_tests:
     needs: [should_run]
-    if: ${{ needs.should_run.outputs.modified }}
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: Integration Tests
     runs-on: ubuntu-22.04
     steps:
@@ -115,7 +114,7 @@ jobs:
   # including older (released) versions of `wash`
   e2e_tests_wash_new_actor:
     needs: [should_run]
-    if: ${{ needs.should_run.outputs.modified }}
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: E2E Tests (`wash new`)
     runs-on: ubuntu-22.04
     strategy:
