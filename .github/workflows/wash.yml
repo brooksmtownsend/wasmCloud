@@ -6,12 +6,6 @@ on:
   merge_group:
   pull_request:
     branches: [main]
-    paths:
-      - .github/workflows/wash.yml
-      - Cargo.lock
-      - Cargo.toml
-      - crates/wash-cli/**
-      - crates/wash-lib/**
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -26,7 +20,29 @@ permissions:
   contents: read
 
 jobs:
+  should_run:
+    runs-on: ubuntu-latest
+    outputs:
+      modified: ${{ steps.changes.outputs.wash }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            wash:
+              - './.github/workflows/wash.yml'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - 'crates/control-interface/**'
+              - 'crates/core/**'
+              - 'crates/secrets-types/**'
+              - 'crates/wash-cli/**'
+              - 'crates/wash-lib/**'
+
   unit_tests:
+    needs: [should_run]
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: Unit Tests
     strategy:
       fail-fast: false # Ensure we can run the full suite even if one OS fails
@@ -66,6 +82,8 @@ jobs:
         working-directory: ./crates/wash-cli
 
   integration_tests:
+    needs: [should_run]
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: Integration Tests
     runs-on: ubuntu-22.04
     steps:
@@ -96,6 +114,8 @@ jobs:
   # Regression E2E tests to ensure that `wash new component` works consistently,
   # including older (released) versions of `wash`
   e2e_tests_wash_new_actor:
+    needs: [should_run]
+    if: ${{ needs.should_run.outputs.modified == 'true' }}
     name: E2E Tests (`wash new`)
     runs-on: ubuntu-22.04
     strategy:
@@ -133,3 +153,19 @@ jobs:
 
       - name: Ensure `wash new` works
         run: wash new component ${{ matrix.template.name }} --template-name ${{ matrix.template.name }}
+
+  # This check always runs, and only succeeds if wash tests should run and they pass
+  wash_successful_checks:
+    needs:
+      - should_run
+      - unit_tests
+      - integration_tests
+      - e2e_tests_wash_new_actor
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      # Conditionally fail job depending on results of previous actions
+      - if: ${{ contains(needs.*.result, 'failure') }}
+        run: exit 1
+      - if: ${{ !contains(needs.*.result, 'failure') }}
+        run: exit 0
