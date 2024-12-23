@@ -23,7 +23,7 @@ jobs:
   should_run:
     runs-on: ubuntu-latest
     outputs:
-      modified: ${{ steps.changes.outputs.wash }}
+      modified: ${{ steps.changes.outputs.wash == 'true' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dorny/paths-filter@v3
@@ -166,7 +166,7 @@ jobs:
   #       run: wash new component ${{ matrix.template.name }} --template-name ${{ matrix.template.name }}
 
   # This check always runs, and only succeeds if wash tests should run and they pass
-  successful_checks:
+  wash_successful_checks:
     needs:
       - should_run
       - unit_tests
