@@ -16,6 +16,7 @@
 
 > [!WARNING]
 > This crate is being deprecated in favor of [wash](https://crates.io/crates/wash), where the wash CLI will be published from now on.
+> I changed something here and wash should run tests and then be ok
 
 - [Why wash](#why-wash)
 - [Installing wash](#installing-wash)
