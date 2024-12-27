@@ -101,40 +101,45 @@ jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
-      wasmcloud_modified: ${{ steps.changes.outputs.wasmcloud }}
-      providers_modified: ${{ steps.changes.outputs.providers }}
+      wasmcloud_modified: ${{ steps.wasmcloud_changes.outputs.any_changed }}
+      providers_modified: ${{ steps.provider_changes.outputs.any_changed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: dorny/paths-filter@v3
-        id: changes
+      - uses: tj-actions/changed-files@7ac5902a02bbf88c426878d792c0728b55bb97ae
+        id: wasmcloud_changes
         with:
           # Consider wasmCloud changed if any Rust file other than
           # capability providers change
-          filters: |
-            wasmcloud:
-              - './.github/actions/build-nix/action.yml'
-              - './.github/actions/install-nix/action.yml'
-              - './.config/nextest.toml'
-              - 'nix/images/default.nix'
-              - 'flake.lock'
-              - 'flake.nix'
-              - 'Cargo.lock'
-              - 'Cargo.toml'
-              - 'rust-toolchain.toml'
-              - 'crates/**/*'
-              - 'crates/provider-sdk/*'
-              - 'src/**/*'
-              - 'tests/**/*'
-              - 'wit/**/*'
-              - '!crates/provider-*'
-              - '!crates/wash-*/'
-              - '!crates/**/*.md'
-              - '!wit/**/*.md'
-            providers:
-              - 'Cargo.lock'
-              - 'Cargo.toml'
-              - 'crates/provider-*'
-              - 'crates/provider-sdk/*'
+          files: |
+            ./.github/actions/build-nix/action.yml
+            ./.github/actions/install-nix/action.yml
+            ./.config/nextest.toml
+            nix/images/default.nix
+            flake.lock
+            flake.nix
+            Cargo.lock
+            Cargo.toml
+            rust-toolchain.toml
+            crates/**/*.{rs,toml,wit}
+            src/**/*.{rs,toml,wit}
+            tests/**/*.{rs,toml,wit}
+            wit/**/*.wit
+          # Somewhat naive assumption that providers will be under `crates/provider-<interface>-<vendor>`
+          # as that is our naming convention for providers.
+          files_ignore: |
+            !crates/provider-*-*
+            !crates/wash-*
+      - uses: tj-actions/changed-files@7ac5902a02bbf88c426878d792c0728b55bb97ae
+        id: provider_changes
+        with:
+          # Consider providers changed if any file in the providers change
+          files: |
+            Cargo.lock
+            Cargo.toml
+            crates/provider-*/*.{rs,toml,wit}
+          files_ignore: |
+            !crates/**/*.md
+
   build-bin:
     needs: [meta]
     if: ${{ needs.meta.outputs.wasmcloud_modified == 'true' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/wash-cli-v')}}
