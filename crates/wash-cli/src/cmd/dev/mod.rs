@@ -29,9 +29,9 @@ mod wit;
 
 const DEFAULT_KEYVALUE_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/keyvalue-nats:0.3.1";
 const DEFAULT_HTTP_CLIENT_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/http-client:0.12.1";
-const DEFAULT_HTTP_SERVER_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/http-server:0.24.0";
+const DEFAULT_HTTP_SERVER_PROVIDER_IMAGE: &str = "wasmcloud+builtin://http-server";
 const DEFAULT_BLOBSTORE_FS_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/blobstore-fs:0.10.1";
-const DEFAULT_MESSAGING_NATS_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/messaging-nats:0.23.1";
+const DEFAULT_MESSAGING_NATS_PROVIDER_IMAGE: &str = "wasmcloud+builtin://messaging-nats";
 
 const DEFAULT_INCOMING_HANDLER_ADDRESS: &str = "127.0.0.1:8000";
 const DEFAULT_MESSAGING_HANDLER_SUBSCRIPTION: &str = "wasmcloud.dev";
