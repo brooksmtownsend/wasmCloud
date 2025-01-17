@@ -11,6 +11,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Build wash with the embedded nats-server library
+embedded_nats = []
+default = []
+
 [badges]
 maintenance = { status = "actively-developed" }
 
@@ -38,6 +43,7 @@ file-guard = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 indicatif = { workspace = true }
+nats-server = { path = "../../../nats-server-rs" }
 nix = { workspace = true, features = ["signal"] }
 nkeys = { workspace = true, features = ["xkeys"] }
 notify = { workspace = true }
@@ -72,6 +78,7 @@ tracing-subscriber = { workspace = true, features = [
     "json",
     "std",
 ] }
+wadm = { workspace = true }
 wadm-client = { workspace = true }
 wadm-types = { workspace = true }
 walkdir = { workspace = true }
@@ -87,6 +94,7 @@ wasm-pkg-client = { workspace = true }
 wasm-pkg-core = { workspace = true }
 wasmcloud-control-interface = { workspace = true }
 wasmcloud-core = { workspace = true }
+wasmcloud-host = { workspace = true }
 wasmcloud-secrets-types = { workspace = true }
 which = { workspace = true }
 wit-bindgen-wrpc = { workspace = true }

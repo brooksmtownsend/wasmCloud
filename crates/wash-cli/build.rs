@@ -42,4 +42,13 @@ async fn main() {
         record_reachability("ghcr.io"),
         record_reachability("wasmcloud.azurecr.io"),
     );
+
+    // #[cfg(feature = "embedded_nats")]
+    {
+        let path = "/Users/brooks/github.com/wasmcloud/nats-server-rs/build";
+        let lib = "rustnats";
+
+        println!("cargo:rustc-link-search=native={}", path);
+        println!("cargo:rustc-link-lib=dylib={}", lib);
+    }
 }

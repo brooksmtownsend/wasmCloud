@@ -23,6 +23,7 @@ use crate::cmd::up::{
 
 mod deps;
 mod devloop;
+mod embedded;
 mod manifest;
 mod session;
 mod wit;
@@ -119,6 +120,10 @@ pub struct DevCommand {
     /// (useful for airgapped or disconnected environments)
     #[clap(long = "skip-fetch")]
     pub skip_wit_fetch: bool,
+
+    /// Use an embedded wasmCloud host and wadm instead of downloading and executing the binaries
+    #[clap(long = "embedded")]
+    pub fully_embedded: bool,
 }
 
 /// Handle `wash dev`
@@ -126,10 +131,9 @@ pub async fn handle_command(
     cmd: DevCommand,
     output_kind: wash_lib::cli::OutputKind,
 ) -> Result<CommandOutput> {
-    let project_cfg = load_config(cmd.package_args.config_path().cloned(), Some(true)).await?;
-    let project_path = cmd
-        .code_dir
-        .unwrap_or_else(|| project_cfg.wasmcloud_toml_dir.clone());
+    let current_dir =
+        std::env::current_dir().context("failed to get current directory for wash dev")?;
+    let project_path = cmd.code_dir.unwrap_or(current_dir);
     let project_cfg = load_config(Some(project_path.clone()), Some(true)).await?;
 
     let mut wash_dev_session = WashDevSession::from_sessions_file(&project_path)
@@ -193,7 +197,7 @@ pub async fn handle_command(
     let (mut nats_child, mut wadm_child, mut wasmcloud_child) = (None, None, None);
 
     // If there is not a running host for this session, then we can start one
-    if wash_dev_session.host_data.is_none() {
+    if wash_dev_session.host_data.is_none() && !cmd.fully_embedded {
         (nats_child, wadm_child, wasmcloud_child) = wash_dev_session
             .start_host(
                 cmd.wasmcloud_opts.clone(),
@@ -203,6 +207,15 @@ pub async fn handle_command(
             )
             .await
             .with_context(|| format!("failed to start host for session [{session_id}]"))?;
+    } else {
+        embedded::start_nats().await?;
+        embedded::start_wadm().await?;
+        let host_id = embedded::start_host().await?;
+        let _ = wash_dev_session.host_data.insert((
+            host_id,
+            // TODO: Output logs still
+            std::env::current_dir().expect("should get current dir"),
+        ));
     }
     let host_id = wash_dev_session
         .host_data
