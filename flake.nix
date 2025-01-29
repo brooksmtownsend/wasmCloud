@@ -597,6 +597,7 @@
               pkgs.kubernetes-helm
               pkgs.minio
               pkgs.nats-server
+              pkgs.protobuf
               pkgs.redis
               pkgs.skopeo
               pkgs.tinygo
