@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package wasmcloud.types;
+
+// CTL message to start component
+message StartComponentRequest {
+    // OCI image reference
+    string reference = 1;
+    // Max number of instances to support scaling to
+    uint32 max_instances = 2;
+}
+
+// CTL message response to start component
+message StartComponentResponse {
+    // ID of the component we started
+    string component_id = 1;
+    // Error message if any
+    string message = 2;
+}

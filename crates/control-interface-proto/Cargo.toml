@@ -1,0 +1,23 @@
+[package]
+name = "wasmcloud-control-interface-proto"
+version = "0.1.0"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Required for generating
+proto = { workspace = true }
+# Required for using
+prost = { workspace = true, features = ["derive", "std"] }
+
+[build-dependencies]
+prost-build = { workspace = true, features = ["format"] }
+
+[dev-dependencies]
+async-nats = { workspace = true, features = ["ring"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
