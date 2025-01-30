@@ -10,11 +10,19 @@ repository.workspace = true
 [dependencies]
 # Required for generating
 proto = { workspace = true }
-# Required for using
+# Required for using the types
 prost = { workspace = true, features = ["derive", "std"] }
+
+# TEMPORARY: not required for this crate, required for consumers
+# maybe consider keeping this and the generated code? idk
+anyhow = { workspace = true }
+async-nats = { workspace = true, features = ["ring"] }
+bytes = { workspace = true }
+futures = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true, features = ["format"] }
+nats-service-generator = { path = "../nats-service-generator" }
 
 [dev-dependencies]
 async-nats = { workspace = true, features = ["ring"] }

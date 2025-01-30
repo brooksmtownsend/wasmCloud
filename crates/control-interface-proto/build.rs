@@ -1,3 +1,5 @@
+use nats_service_generator::NatsServiceGenerator;
+
 fn main() -> std::io::Result<()> {
     // Find all the .proto files
     let protos = std::fs::read_dir("src")?
@@ -12,6 +14,10 @@ fn main() -> std::io::Result<()> {
             })
         })
         .collect::<Vec<_>>();
-    prost_build::compile_protos(&protos, &["src/"])?;
+
+    prost_build::Config::new()
+        .out_dir("src/generated")
+        .service_generator(Box::new(NatsServiceGenerator))
+        .compile_protos(&protos, &["src/"])?;
     Ok(())
 }

@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package wasmcloud.types;
 
+service ControlInterfaceService {
+    // Request/Response
+    rpc StartComponent(StartComponentRequest) returns (StartComponentResponse);
+}
+
 // CTL message to start component
 message StartComponentRequest {
     // OCI image reference

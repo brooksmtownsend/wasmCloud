@@ -1508,7 +1508,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68578f196d2a33ff61b27fae256c3164f65e36382648e30666dde05b8cc9dfdf"
 dependencies = [
  "async-trait",
- "convert_case",
+ "convert_case 0.6.0",
  "json5",
  "nom",
  "pathdiff",
@@ -1579,6 +1579,15 @@ name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "convert_case"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb402b8d4c85569410425650ce3eddc7d698ed96d39a73f941b08fb63082f1e7"
 dependencies = [
  "unicode-segmentation",
 ]
@@ -3976,6 +3985,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bddcd3bf5144b6392de80e04c347cd7fab2508f6df16a85fc496ecd5cec39bc"
 dependencies = [
  "rand 0.8.5",
+]
+
+[[package]]
+name = "nats-service-generator"
+version = "0.1.0"
+dependencies = [
+ "convert_case 0.7.1",
+ "prost-build 0.13.4",
 ]
 
 [[package]]
@@ -8354,9 +8371,11 @@ dependencies = [
 name = "wasmcloud-control-interface-proto"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-nats",
  "bytes",
  "futures",
+ "nats-service-generator",
  "prost 0.13.4",
  "prost-build 0.13.4",
  "proto",
