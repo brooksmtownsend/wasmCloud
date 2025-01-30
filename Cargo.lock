@@ -3988,14 +3988,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nats-service-generator"
-version = "0.1.0"
-dependencies = [
- "convert_case 0.7.1",
- "prost-build 0.13.4",
-]
-
-[[package]]
 name = "nix"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8368,21 +8360,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasmcloud-control-interface-proto"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "bytes",
- "futures",
- "nats-service-generator",
- "prost 0.13.4",
- "prost-build 0.13.4",
- "proto",
- "tokio",
-]
-
-[[package]]
 name = "wasmcloud-core"
 version = "0.16.0"
 dependencies = [
@@ -8462,6 +8439,29 @@ dependencies = [
  "cbindgen",
  "tokio",
  "wasmcloud-host",
+]
+
+[[package]]
+name = "wasmcloud-proto-generator"
+version = "0.1.0"
+dependencies = [
+ "convert_case 0.7.1",
+ "prost-build 0.13.4",
+]
+
+[[package]]
+name = "wasmcloud-proto-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "bytes",
+ "futures",
+ "prost 0.13.4",
+ "prost-build 0.13.4",
+ "proto",
+ "tokio",
+ "wasmcloud-proto-generator",
 ]
 
 [[package]]

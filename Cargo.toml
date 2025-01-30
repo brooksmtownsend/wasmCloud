@@ -234,6 +234,7 @@ cloudevents-sdk = { version = "0.7", default-features = false }
 command-group = { version = "5", default-features = false }
 config = { version = "0.14", default-features = false }
 console = { version = "0.15", default-features = false }
+convert_case = { version = "0.7", default-features = false}
 crossterm = { version = "0.28.1", default-features = false }
 data-encoding = { version = "2", default-features = false }
 deadpool-postgres = { version = "0.13", default-features = false }
@@ -368,6 +369,7 @@ wasmcloud-provider-messaging-kafka = { version = "*", path = "./crates/provider-
 wasmcloud-provider-messaging-nats = { version = "^0.24.0", path = "./crates/provider-messaging-nats", default-features = false }
 wasmcloud-provider-sdk = { version = "^0.13.0", path = "./crates/provider-sdk", default-features = false }
 wasmcloud-provider-sqldb-postgres = { version = "*", path = "./crates/provider-sqldb-postgres", default-features = false }
+wasmcloud-proto-generator = { version = "0.1", path = "./crates/wasmcloud-proto-generator", default-features = false }
 wasmcloud-runtime = { version = "^0.8.0", path = "./crates/runtime", default-features = false }
 wasmcloud-secrets-client = { version = "^0.6.0", path = "./crates/secrets-client", default-features = false }
 wasmcloud-secrets-types = { version = "^0.5.0", path = "./crates/secrets-types", default-features = false }

@@ -1,9 +1,9 @@
 use convert_case::{Case, Casing};
 use prost_build::{Service, ServiceGenerator};
 
-pub struct NatsServiceGenerator;
+pub struct WasmcloudProtoGenerator;
 
-impl ServiceGenerator for NatsServiceGenerator {
+impl ServiceGenerator for WasmcloudProtoGenerator {
     fn generate(&mut self, service: Service, buf: &mut String) {
         let client_handlers_trait = get_client_handlers_trait(&service);
         let client_nats_implementation = get_client_nats_implementation(&service);
@@ -94,7 +94,7 @@ fn get_client_nats_implementation(service: &Service) -> String {
 
     let methods = &service.methods;
     let reply_methods = filter_methods_by_type(methods, MethodType::RequestResponse);
-    reply_methods
+    let functions = reply_methods
         .iter()
         .map(|method| {
             let function_name = convert_method_to_function(&method.name);
@@ -103,30 +103,36 @@ fn get_client_nats_implementation(service: &Service) -> String {
             let output_type = &method.output_type;
             format!(
                 r#"
-                /// Send request [{input_type}], receiving the decoded [{output_type}]
-                impl {name}Client for ::async_nats::Client {{
-                    async fn {function_name}(
-                        &self,
-                        request: {input_type},
-                    ) -> anyhow::Result<{output_type}> {{
-                        let mut buf = ::bytes::BytesMut::with_capacity(request.encoded_len());
-                        request
-                            .encode(&mut buf)
-                            .context("failed to encode {input_type}")?;
-                        let reply = self
-                            // TODO: No hardcoded prefix
-                            .request("wasmbus.ctl.proto.{function_subject}", buf.into())
-                            .await
-                            .context("failed to send NATS request for {function_name}")?;
-                        // TODO: more error handling on response message
-                        {output_type}::decode(reply.payload).context("failed to decode reply as {output_type}")
-                    }}
+                /// Send request [{input_type}], decode response as [{output_type}]
+                async fn {function_name}(
+                    &self,
+                    request: {input_type},
+                ) -> anyhow::Result<{output_type}> {{
+                    let mut buf = ::bytes::BytesMut::with_capacity(request.encoded_len());
+                    request
+                        .encode(&mut buf)
+                        .context("failed to encode {input_type}")?;
+                    let reply = self
+                        // TODO: No hardcoded prefix
+                        .request("wasmbus.ctl.proto.{function_subject}", buf.into())
+                        .await
+                        .context("failed to send NATS request for {function_name}")?;
+                    // TODO: more error handling on response message
+                    {output_type}::decode(reply.payload).context("failed to decode reply as {output_type}")
                 }}
             "#
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+
+    format!(
+        r#"
+        impl {name}Client for ::async_nats::Client {{
+            {functions}
+        }}
+        "#
+    )
 }
 
 /// Generate the trait for the handlers of a [Service]
@@ -177,6 +183,7 @@ fn get_server_nats_implementation(service: &Service) -> String {
         .iter()
         .map(|method| {
             let function_subject = convert_method_to_subject(&method.name);
+            let function_name = convert_method_to_function(&method.name);
             let input_type = &method.input_type;
             format!(
                 r#"
@@ -184,7 +191,7 @@ fn get_server_nats_implementation(service: &Service) -> String {
                     let request = {input_type}::decode(message.payload)
                         .context("failed to decode message payload as {input_type}")?;
                     let reply = server
-                        .start_component(request)
+                        .{function_name}(request)
                         .await
                         .context("failed to handle {input_type} request")?;
                     if let Some(reply_to) = message.reply {{
@@ -209,7 +216,6 @@ fn get_server_nats_implementation(service: &Service) -> String {
     format!(
         r#"
         // TODO: this could be a trait impl maybe?
-        // TODO: this should probs just be a future that people can do what they want with
         #[allow(dead_code)]
         pub async fn start_server<S>(
             server: S,
@@ -278,4 +284,32 @@ fn convert_method_to_function(method: &str) -> String {
 /// Convert a method name to a NATS subject friendly name
 fn convert_method_to_subject(method: &str) -> String {
     method.to_case(Case::Snake).replace("_", ".")
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{convert_method_to_function, convert_method_to_subject};
+
+    #[test]
+    fn can_convert_to_function() {
+        assert_eq!(
+            convert_method_to_function("StartComponent"),
+            "start_component"
+        );
+        assert_eq!(
+            convert_method_to_function("StartProvider"),
+            "start_provider"
+        );
+        assert_eq!(convert_method_to_function("PutConfig"), "put_config");
+    }
+
+    #[test]
+    fn can_convert_to_subject() {
+        assert_eq!(
+            convert_method_to_subject("StartComponent"),
+            "start.component"
+        );
+        assert_eq!(convert_method_to_subject("StartProvider"), "start.provider");
+        assert_eq!(convert_method_to_subject("PutConfig"), "put.config");
+    }
 }

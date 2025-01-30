@@ -1,5 +1,5 @@
 [package]
-name = "wasmcloud-control-interface-proto"
+name = "wasmcloud-proto-types"
 version = "0.1.0"
 authors.workspace = true
 categories.workspace = true
@@ -13,8 +13,8 @@ proto = { workspace = true }
 # Required for using the types
 prost = { workspace = true, features = ["derive", "std"] }
 
-# TEMPORARY: not required for this crate, required for consumers
-# maybe consider keeping this and the generated code? idk
+# NOTE: not required for this crate, required for consumers of the generated code
+# Consider either vendoring these dependencies or removing them, or a feature flag
 anyhow = { workspace = true }
 async-nats = { workspace = true, features = ["ring"] }
 bytes = { workspace = true }
@@ -22,10 +22,8 @@ futures = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true, features = ["format"] }
-nats-service-generator = { path = "../nats-service-generator" }
+wasmcloud-proto-generator = { workspace = true }
 
 [dev-dependencies]
 async-nats = { workspace = true, features = ["ring"] }
-bytes = { workspace = true }
-futures = { workspace = true }
 tokio = { workspace = true }

@@ -1,5 +1,5 @@
 [package]
-name = "nats-service-generator"
+name = "wasmcloud-proto-generator"
 version = "0.1.0"
 authors.workspace = true
 categories.workspace = true
@@ -8,5 +8,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-convert_case = "0.7.1"
+convert_case = { workspace = true }
 prost-build = { workspace = true, features = ["format"] }

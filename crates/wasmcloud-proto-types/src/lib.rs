@@ -59,9 +59,6 @@ mod test {
                 .expect("to subscribe and start server")
         });
 
-        // Let subscriptions get set up
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
         let reply = nats_client
             .start_component(crate::wasmcloud::ctl::StartComponentRequest {
                 reference: "test".to_string(),

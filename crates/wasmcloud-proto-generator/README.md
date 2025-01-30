@@ -1,4 +1,9 @@
-# nats-service-generator
+# wasmcloud-proto-generator
+
+> [!WARNING]
+> This crate is experimental and likely to experience breaking changes. Used as the service generator for [wasmcloud-proto-types](../wasmcloud-proto-types/) and should be used individually with caution.
+
+This crate is responsible for generating `Server` and `Client` traits for [wasmcloud-proto-types](../wasmcloud-proto-types/), enabling simple client-side requests using [async-nats](https://crates.io/crates/async-nats) and implementing and handling server-side requests using a generated trait.
 
 ## Example generated code
 
@@ -118,3 +123,11 @@ where
     })
 }
 ```
+
+## Considerations
+
+- [ ] How should we determine the subject prefix for subscriptions?
+
+## Credit
+
+Huge thanks to the [protobuf-zmq-rust-generator](https://crates.io/crates/protobuf-zmq-rust-generator) crate for inspiration and instructions.
