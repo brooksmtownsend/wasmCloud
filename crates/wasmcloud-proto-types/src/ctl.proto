@@ -1,24 +1,42 @@
 syntax = "proto3";
 
-package wasmcloud.types;
+package wasmcloud.ctl;
 
 service ControlInterfaceService {
     // Request/Response
-    rpc StartComponent(StartComponentRequest) returns (StartComponentResponse);
+    rpc ScaleComponent(ScaleComponentRequest) returns (ScaleComponentResponse);
 }
 
 // CTL message to start component
-message StartComponentRequest {
-    // OCI image reference
-    string reference = 1;
-    // Max number of instances to support scaling to
-    uint32 max_instances = 2;
+message ScaleComponentRequest {
+    // Image reference for the component
+    string component_ref = 1;
+
+    // Unique identifier of the component to scale
+    string component_id = 2;
+
+    // Optional set of annotations
+    map<string, string> annotations = 3;
+
+    // The maximum number of concurrent executing instances of this component
+    uint32 max_instances = 4;
+
+    // Host ID on which to scale this component
+    string host_id = 5;
+
+    // A list of named configs to use for this component
+    repeated string config = 6;
+
+    // Whether to perform an update if details of the component change
+    bool allow_update = 7;
 }
 
 // CTL message response to start component
-message StartComponentResponse {
-    // ID of the component we started
-    string component_id = 1;
+message ScaleComponentResponse {
+    // Whether or not the operation was successful
+    bool success = 1;
     // Error message if any
     string message = 2;
+    // ID of the component we started
+    string component_id = 3;
 }

@@ -1,25 +1,29 @@
 // Include the `items` module, which is generated from items.proto.
 // It is important to maintain the same structure as in the proto.
-pub mod wasmcloud {
+pub mod generated {
     pub mod ctl {
-        include!("generated/wasmcloud.types.rs");
+        include!(concat!(env!("OUT_DIR"), "/wasmcloud.ctl.rs"));
     }
+    // Each .proto should be included as its own module for organization purposes.
 }
 
 #[cfg(test)]
 mod test {
-    use super::wasmcloud;
-    use crate::wasmcloud::ctl::{ControlInterfaceServiceClient, ControlInterfaceServiceServer};
+    use crate::generated::ctl::{
+        start_server, ControlInterfaceServiceClient, ControlInterfaceServiceServer,
+        ScaleComponentRequest, ScaleComponentResponse,
+    };
 
     struct Host;
     impl ControlInterfaceServiceServer for Host {
-        async fn start_component(
+        async fn scale_component(
             &self,
-            request: wasmcloud::ctl::StartComponentRequest,
-        ) -> anyhow::Result<wasmcloud::ctl::StartComponentResponse> {
-            let component_id = format!("{}-{}", request.reference, request.max_instances);
-            Ok(wasmcloud::ctl::StartComponentResponse {
+            request: ScaleComponentRequest,
+        ) -> anyhow::Result<ScaleComponentResponse> {
+            let component_id = format!("{}-{}", request.component_ref, request.max_instances);
+            Ok(ScaleComponentResponse {
                 component_id,
+                success: true,
                 message: "everything went smoothly and we're going to be okay".to_string(),
             })
         }
@@ -29,12 +33,13 @@ mod test {
     #[tokio::test]
     async fn unit_test_proto() {
         let host = Host {};
-        let request = wasmcloud::ctl::StartComponentRequest {
-            reference: "test".to_string(),
+        let request = ScaleComponentRequest {
+            component_ref: "test".to_string(),
             max_instances: 1,
+            ..Default::default()
         };
         let response = host
-            .start_component(request)
+            .scale_component(request)
             .await
             .expect("host to handle request");
 
@@ -54,15 +59,16 @@ mod test {
         let host = Host {};
         let server = tokio::spawn({
             let nats_client = nats_client.clone();
-            wasmcloud::ctl::start_server(host, nats_client)
+            start_server(host, nats_client)
                 .await
                 .expect("to subscribe and start server")
         });
 
         let reply = nats_client
-            .start_component(crate::wasmcloud::ctl::StartComponentRequest {
-                reference: "test".to_string(),
+            .scale_component(ScaleComponentRequest {
+                component_ref: "test".to_string(),
                 max_instances: 1,
+                ..Default::default()
             })
             .await
             .expect("should start component");

@@ -1,6 +1,9 @@
 use protobuf_nats_service_generator::NatsServiceGenerator;
 
 fn main() -> std::io::Result<()> {
+    println!("cargo::rerun-if-changed=src/*.rs");
+    println!("cargo::rerun-if-changed=src/*.proto");
+
     // Find all the .proto files
     let protos = std::fs::read_dir("src")?
         .filter_map(|entry| {
@@ -16,7 +19,6 @@ fn main() -> std::io::Result<()> {
         .collect::<Vec<_>>();
 
     prost_build::Config::new()
-        .out_dir("src/generated")
         .service_generator(Box::new(NatsServiceGenerator))
         .compile_protos(&protos, &["src/"])?;
     Ok(())

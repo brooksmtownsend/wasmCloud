@@ -19,5 +19,4 @@ It's recommended to set the following configuration option in your rust-analyzer
 
 ## Considerations
 
-- [ ] Should the generated types be output to `src/generated`, or just kept in the `OUT_DIR`?
 - [ ] Should required dependencies for generated types be included in this crate and vendored, or left up to the client?
