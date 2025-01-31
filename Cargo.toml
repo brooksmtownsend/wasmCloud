@@ -282,6 +282,7 @@ provider-archive = { version = "^0.14.0", path = "./crates/provider-archive", de
 proto = { version = "0.1.2", default-features = false }
 prost = { version = "0.13.4", default-features = false }
 prost-build = { version = "0.13.4", default-features = false }
+protobuf-nats-service-generator = { version = "0.1", path = "./crates/protobuf-nats-service-generator", default-features = false }
 quote = { version = "1", default-features = false }
 rand = { version = "0.8", default-features = false }
 redis = { version = "0.25", default-features = false }
@@ -369,7 +370,6 @@ wasmcloud-provider-messaging-kafka = { version = "*", path = "./crates/provider-
 wasmcloud-provider-messaging-nats = { version = "^0.24.0", path = "./crates/provider-messaging-nats", default-features = false }
 wasmcloud-provider-sdk = { version = "^0.13.0", path = "./crates/provider-sdk", default-features = false }
 wasmcloud-provider-sqldb-postgres = { version = "*", path = "./crates/provider-sqldb-postgres", default-features = false }
-wasmcloud-proto-generator = { version = "0.1", path = "./crates/wasmcloud-proto-generator", default-features = false }
 wasmcloud-runtime = { version = "^0.8.0", path = "./crates/runtime", default-features = false }
 wasmcloud-secrets-client = { version = "^0.6.0", path = "./crates/secrets-client", default-features = false }
 wasmcloud-secrets-types = { version = "^0.5.0", path = "./crates/secrets-types", default-features = false }

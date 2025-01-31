@@ -5051,6 +5051,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "protobuf-nats-service-generator"
+version = "0.1.0"
+dependencies = [
+ "convert_case 0.7.1",
+ "prost-build 0.13.4",
+]
+
+[[package]]
 name = "protox"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8442,14 +8450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasmcloud-proto-generator"
-version = "0.1.0"
-dependencies = [
- "convert_case 0.7.1",
- "prost-build 0.13.4",
-]
-
-[[package]]
 name = "wasmcloud-proto-types"
 version = "0.1.0"
 dependencies = [
@@ -8460,8 +8460,8 @@ dependencies = [
  "prost 0.13.4",
  "prost-build 0.13.4",
  "proto",
+ "protobuf-nats-service-generator",
  "tokio",
- "wasmcloud-proto-generator",
 ]
 
 [[package]]

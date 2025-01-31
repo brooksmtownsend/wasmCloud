@@ -1,4 +1,4 @@
-use wasmcloud_proto_generator::WasmcloudProtoGenerator;
+use protobuf_nats_service_generator::NatsServiceGenerator;
 
 fn main() -> std::io::Result<()> {
     // Find all the .proto files
@@ -17,7 +17,7 @@ fn main() -> std::io::Result<()> {
 
     prost_build::Config::new()
         .out_dir("src/generated")
-        .service_generator(Box::new(WasmcloudProtoGenerator))
+        .service_generator(Box::new(NatsServiceGenerator))
         .compile_protos(&protos, &["src/"])?;
     Ok(())
 }
