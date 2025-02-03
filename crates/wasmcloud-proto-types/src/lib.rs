@@ -10,12 +10,15 @@ pub mod generated {
 #[cfg(test)]
 mod test {
     use crate::generated::ctl::{
-        start_server, ControlInterfaceServiceClient, ControlInterfaceServiceServer,
-        ScaleComponentRequest, ScaleComponentResponse,
+        start_server, ControlInterfaceServiceClient, ControlInterfaceServiceClientPrefix,
+        ControlInterfaceServiceServer, ScaleComponentRequest, ScaleComponentResponse,
     };
 
     struct Host;
     impl ControlInterfaceServiceServer for Host {
+        fn subject_prefix(&self) -> &'static str {
+            "wasmbus.ctl.vproto.default"
+        }
         async fn scale_component(
             &self,
             request: ScaleComponentRequest,
@@ -26,6 +29,11 @@ mod test {
                 success: true,
                 message: "everything went smoothly and we're going to be okay".to_string(),
             })
+        }
+    }
+    impl ControlInterfaceServiceClientPrefix for async_nats::Client {
+        fn subject_prefix(&self) -> &'static str {
+            "wasmbus.ctl.vproto.default"
         }
     }
 

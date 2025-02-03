@@ -80,6 +80,28 @@ fn get_client_handlers_trait(service: &Service) -> String {
 
     format!(
         r#"
+        pub trait {name}ClientPrefix {{
+            /// Get the subject prefix for this service. Defaults to
+            /// "nats.proto" and can be overridden with your own implementation.
+            /// 
+            /// # Usage
+            /// For the default prefix, simply use the default implementation:
+            /// ```rust
+            /// impl {name}ClientPrefix for async_nats::Client {{}}
+            /// ```
+            /// 
+            /// To use your own prefix, implement this trait for your client:
+            /// ```rust
+            /// impl {name}ClientPrefix for async_nats::Client {{
+            ///     fn subject_prefix(&self) -> &'static str {{
+            ///        "my.prefix"
+            ///     }}
+            /// }}
+            /// ```
+            fn subject_prefix(&self) -> &'static str {{
+                "nats.proto"
+            }}
+        }}
         /// This will be used to implement the handlers for the client
         pub trait {name}Client {{
             {function_handlers}
@@ -113,8 +135,7 @@ fn get_client_nats_implementation(service: &Service) -> String {
                         .encode(&mut buf)
                         .context("failed to encode {input_type}")?;
                     let reply = self
-                        // TODO: No hardcoded prefix
-                        .request("wasmbus.ctl.proto.{function_subject}", buf.into())
+                        .request(format!("{{}}.{function_subject}", self.subject_prefix().trim_end_matches('.')), buf.into())
                         .await
                         .context("failed to send NATS request for {function_name}")?;
                     // TODO: more error handling on response message
@@ -128,7 +149,23 @@ fn get_client_nats_implementation(service: &Service) -> String {
 
     format!(
         r#"
-        impl {name}Client for ::async_nats::Client {{
+        /// Implement the {name}Client trait for the async_nats::Client
+        /// 
+        /// # Usage
+        /// ```ignore
+        /// use generated::{{RequestType, ResponseType, {name}ClientPrefix}};
+        /// /// Define your subject prefix or use the default. The {name}Client trait is already
+        /// /// implemented for the async_nats::Client, so you can use it directly.
+        /// impl {name}ClientPrefix for async_nats::Client {{}}
+        /// async fn main() -> anyhow::Result<()> {{
+        ///    let client = async_nats::connect("nats://127.0.0.1:4222").await.expect("to connect");
+        ///    let request = RequestType::default();
+        ///    let response: ResponseType = client.function_name(request).await.expect("to send request");
+        ///    Ok(())
+        /// }}
+        /// 
+        /// ```
+        impl {name}Client for ::async_nats::Client where ::async_nats::Client: {name}ClientPrefix {{
             {functions}
         }}
         "#
@@ -165,6 +202,12 @@ fn get_server_handlers_trait(service: &Service) -> String {
         r#"
         /// This will be used to implement the handlers for the server
         pub trait {name}Server {{
+            /// Get the subject prefix for this service. Defaults to
+            /// "nats.proto" and can be overridden with your own implementation.
+            /// If the subject prefix does not include the trailing '.' character, it will be added.
+            fn subject_prefix(&self) -> &'static str {{
+                "nats.proto"
+            }}
             {function_handlers}
         }}
         "#,
@@ -185,7 +228,7 @@ fn get_server_nats_implementation(service: &Service) -> String {
             let input_type = &method.input_type;
             format!(
                 r#"
-                "wasmbus.ctl.proto.{function_subject}" => {{
+                Some(".{function_subject}") => {{
                     let request = {input_type}::decode(message.payload)
                         .context("failed to decode message payload as {input_type}")?;
                     let reply = server
@@ -222,16 +265,17 @@ fn get_server_nats_implementation(service: &Service) -> String {
         where
             S: {name}Server + Send + 'static,
         {{
+            let subject_prefix = server.subject_prefix().trim_end_matches('.');
             let mut subscription = client
-                .subscribe("wasmbus.ctl.proto.>")
+                .subscribe(format!("{{subject_prefix}}.>"))
                 .await
                 .context("failed to subscribe for {name} messages")?;
             Ok(async move {{
                 while let Some(message) = subscription.next().await {{
-                    match message.subject.as_str() {{
+                    match message.subject.as_str().strip_prefix(&subject_prefix) {{
                         {matchy}
                         _ => {{
-                            eprintln!("Unknown subject: {{}}", message.subject);
+                            eprintln!("received message on unknown subject: {{}}", message.subject);
                         }}
                     }}
                 }}
