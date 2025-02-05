@@ -10,6 +10,11 @@ use uuid::Uuid;
 use wascap::jwt;
 use wasmcloud_control_interface::Link;
 
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/wasmcloud.events.rs"));
+}
+pub use generated::*;
+
 fn format_component_claims(claims: &jwt::Claims<jwt::Component>) -> serde_json::Value {
     let issuer = &claims.issuer;
     let not_before_human = claims
@@ -40,7 +45,7 @@ fn format_component_claims(claims: &jwt::Claims<jwt::Component>) -> serde_json::
     }
 }
 
-pub fn component_scaled(
+pub(crate) fn component_scaled(
     claims: Option<&jwt::Claims<jwt::Component>>,
     annotations: &BTreeMap<String, String>,
     host_id: impl AsRef<str>,
@@ -69,7 +74,7 @@ pub fn component_scaled(
     }
 }
 
-pub fn component_scale_failed(
+pub(crate) fn component_scale_failed(
     claims: Option<&jwt::Claims<jwt::Component>>,
     annotations: &BTreeMap<String, String>,
     host_id: impl AsRef<str>,
@@ -100,7 +105,7 @@ pub fn component_scale_failed(
     }
 }
 
-pub fn linkdef_set(link: &Link) -> serde_json::Value {
+pub(crate) fn linkdef_set(link: &Link) -> serde_json::Value {
     json!({
         "source_id": link.source_id(),
         "target": link.target(),
@@ -113,7 +118,7 @@ pub fn linkdef_set(link: &Link) -> serde_json::Value {
     })
 }
 
-pub fn linkdef_set_failed(link: &Link, error: &anyhow::Error) -> serde_json::Value {
+pub(crate) fn linkdef_set_failed(link: &Link, error: &anyhow::Error) -> serde_json::Value {
     json!({
         "source_id": link.source_id(),
         "target": link.target(),
@@ -127,7 +132,7 @@ pub fn linkdef_set_failed(link: &Link, error: &anyhow::Error) -> serde_json::Val
     })
 }
 
-pub fn linkdef_deleted(
+pub(crate) fn linkdef_deleted(
     source_id: impl AsRef<str>,
     target: Option<&String>,
     name: impl AsRef<str>,
@@ -156,7 +161,7 @@ pub fn linkdef_deleted(
     }
 }
 
-pub fn provider_started(
+pub(crate) fn provider_started(
     claims: Option<&jwt::Claims<jwt::CapabilityProvider>>,
     annotations: &BTreeMap<String, String>,
     host_id: impl AsRef<str>,
@@ -201,7 +206,7 @@ pub fn provider_started(
     }
 }
 
-pub fn provider_start_failed(
+pub(crate) fn provider_start_failed(
     provider_ref: impl AsRef<str>,
     provider_id: impl AsRef<str>,
     host_id: impl AsRef<str>,
@@ -217,7 +222,7 @@ pub fn provider_start_failed(
     })
 }
 
-pub fn provider_stopped(
+pub(crate) fn provider_stopped(
     annotations: &BTreeMap<String, String>,
     host_id: impl AsRef<str>,
     provider_id: impl AsRef<str>,
@@ -235,7 +240,7 @@ pub fn provider_stopped(
     })
 }
 
-pub fn provider_health_check(
+pub(crate) fn provider_health_check(
     host_id: impl AsRef<str>,
     provider_id: impl AsRef<str>,
 ) -> serde_json::Value {
@@ -245,26 +250,38 @@ pub fn provider_health_check(
     })
 }
 
-pub fn config_set(config_name: impl AsRef<str>) -> serde_json::Value {
+pub(crate) fn config_set(config_name: impl AsRef<str>) -> serde_json::Value {
     json!({
         "config_name": config_name.as_ref(),
     })
 }
 
-pub fn config_deleted(config_name: impl AsRef<str>) -> serde_json::Value {
+pub(crate) fn config_deleted(config_name: impl AsRef<str>) -> serde_json::Value {
     json!({
         "config_name": config_name.as_ref(),
     })
 }
 
-pub fn labels_changed(
+// pub(crate) fn labels_changed(
+//     host_id: impl AsRef<str>,
+//     labels: impl Into<HashMap<String, String>>,
+// ) -> serde_json::Value {
+//     json!({
+//         "host_id": host_id.as_ref(),
+//         "labels": labels.into(),
+//     })
+// }
+
+// Example of using the generated type instead
+pub(crate) fn labels_changed(
     host_id: impl AsRef<str>,
     labels: impl Into<HashMap<String, String>>,
 ) -> serde_json::Value {
-    json!({
-        "host_id": host_id.as_ref(),
-        "labels": labels.into(),
+    serde_json::to_value(&generated::LabelsChanged {
+        host_id: host_id.as_ref().to_string(),
+        labels: labels.into(),
     })
+    .expect("to serialize properly")
 }
 
 #[instrument(level = "debug", skip(event_builder, ctl_nats, data))]

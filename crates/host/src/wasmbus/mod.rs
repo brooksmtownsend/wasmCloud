@@ -72,13 +72,14 @@ use crate::{
 
 mod claims;
 mod ctl;
-mod event;
 mod experimental;
 mod handler;
 mod jetstream;
 mod providers;
 
 pub mod config;
+/// wasmCloud Cloud Events
+pub mod event;
 /// wasmCloud host configuration
 pub mod host_config;
 
