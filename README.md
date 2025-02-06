@@ -12,7 +12,9 @@
 
 ![wasmCloud logo](https://raw.githubusercontent.com/wasmCloud/branding/main/02.Horizontal%20Version/Pixel/PNG/Wasmcloud.Logo-Hrztl_Color.png)
 
-<img src="https://markupgo.com/github/wasmCloud/wasmCloud/contributors?count=0&circleSize=40&circleRadius=40&center=true" width="100%" /> 
+<img src="https://markupgo.com/github/wasmCloud/wasmCloud/contributors?count=0&circleSize=40&circleRadius=40&center=true" width="100%" />
+
+I FIX WASH
 
 wasmCloud is an open source Cloud Native Computing Foundation (CNCF) project that enables teams to build, manage, and scale polyglot Wasm apps across any cloud, K8s, or edge.
 
