@@ -55,7 +55,7 @@ impl AsRef<str> for ResourceRef<'_> {
             // valid string
             ResourceRef::File(path) => path.to_str().expect("invalid file reference URL"),
             ResourceRef::Oci(s) => s,
-            ResourceRef::Builtin(s) => s,
+            ResourceRef::Builtin(_s) => panic!("no more builtins"),
         }
     }
 }
