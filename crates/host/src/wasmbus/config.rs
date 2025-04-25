@@ -10,6 +10,8 @@ use tokio::sync::{
 };
 use tracing::{error, warn, Instrument};
 
+use super::store::StoreManager;
+
 type LockedConfig = Arc<RwLock<HashMap<String, String>>>;
 /// A cache of named config mapped to an existing receiver
 type WatchCache = Arc<RwLock<HashMap<String, Receiver<HashMap<String, String>>>>>;
@@ -192,7 +194,7 @@ impl ConfigBundle {
 /// A struct used for generating a config bundle given a list of named configs
 #[derive(Clone)]
 pub struct BundleGenerator {
-    store: Store,
+    store: Arc<dyn StoreManager>,
     watch_cache: WatchCache,
     watch_handles: Arc<RwLock<AbortHandles>>,
 }
@@ -200,7 +202,7 @@ pub struct BundleGenerator {
 impl BundleGenerator {
     /// Create a new bundle generator
     #[must_use]
-    pub fn new(store: Store) -> Self {
+    pub fn new(store: Arc<dyn StoreManager>) -> Self {
         Self {
             store,
             watch_cache: Arc::default(),
@@ -240,17 +242,18 @@ impl BundleGenerator {
 
         // Otherwise we need to setup the watcher. We start by setting up the watch so we don't miss
         // any events after we query the initial config
-        let (tx, rx) = watch::channel(config);
-        let (done, wait) = tokio::sync::oneshot::channel();
-        let (handle, reg) = AbortHandle::new_pair();
-        tokio::task::spawn(Abortable::new(
-            watcher_loop(self.store.clone(), name.clone(), tx, done),
-            reg,
-        ));
+        let (_tx, rx) = watch::channel(config);
+        // let (done, wait) = tokio::sync::oneshot::channel();
+        let (handle, _reg) = AbortHandle::new_pair();
+        // TODO(brooksmtownsend): re-enable
+        // tokio::task::spawn(Abortable::new(
+        //     watcher_loop(self.store.clone(), name.clone(), tx, done),
+        //     reg,
+        // ));
 
-        wait.await
-            .context("Error waiting for watcher to start")?
-            .context("Error waiting for watcher to start")?;
+        // wait.await
+        //     .context("Error waiting for watcher to start")?
+        //     .context("Error waiting for watcher to start")?;
 
         // NOTE(thomastaylor312): We should probably find a way to clear out this cache. The Sender
         // part of the channel can tell you how many receivers it has, but we pass that along to the

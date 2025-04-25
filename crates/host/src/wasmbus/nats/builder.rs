@@ -30,7 +30,7 @@ pub struct NatsHostBuilder {
     // Required fields
     ctl_nats: Client,
     ctl_topic_prefix: String,
-    config_generator: BundleGenerator,
+    config_generator: Option<BundleGenerator>,
     registry_config: HashMap<String, RegistryConfig>,
 
     // Trait implementations for NATS
@@ -73,12 +73,12 @@ impl NatsHostBuilder {
         let mut registry_config = supplemental_config.registry_config.unwrap_or_default();
         merge_registry_config(&mut registry_config, oci_opts).await;
 
-        let config_generator = BundleGenerator::new(config_data.clone());
+        // let config_generator = BundleGenerator::new(config_data.clone());
 
         Ok(Self {
             ctl_nats,
             ctl_topic_prefix,
-            config_generator,
+            config_generator: None,
             registry_config,
             config_store: Arc::new(config_data),
             data_store: Arc::new(data),

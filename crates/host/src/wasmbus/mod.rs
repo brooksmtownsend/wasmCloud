@@ -725,9 +725,9 @@ impl HostBuilder {
     }
 
     /// Initialize the host with the given configuration watching bundle
-    pub fn with_bundle_generator(self, bundle_generator: BundleGenerator) -> Self {
+    pub fn with_bundle_generator(self, bundle_generator: Option<BundleGenerator>) -> Self {
         Self {
-            bundle_generator: Some(bundle_generator),
+            bundle_generator,
             ..self
         }
     }
@@ -952,7 +952,10 @@ impl HostBuilder {
             config_store: self
                 .config_store
                 .unwrap_or_else(|| Arc::new(DefaultStore::new())),
-            config_generator: self.bundle_generator.unwrap(),
+            // TODO(brooksmtownsend): We should actually get the real config bundle generator once it's traitified
+            config_generator: self
+                .bundle_generator
+                .unwrap_or_else(|| BundleGenerator::new(Arc::new(DefaultStore::new()))),
         };
 
         let host = Arc::new(host);
