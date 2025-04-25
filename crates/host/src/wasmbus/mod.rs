@@ -625,6 +625,8 @@ pub struct HostBuilder {
     registry_config: HashMap<String, RegistryConfig>,
 
     // Host trait extensions
+    // TODO(brooksmtownsend): This should probably be a part of the config store
+    bundle_generator: Option<BundleGenerator>,
     /// The configuration store to use for managing configuration data
     config_store: Option<Arc<dyn StoreManager>>,
     /// The data store to use for managing data
@@ -720,6 +722,14 @@ impl HostBuilder {
     /// Initialize the host with the given data store
     pub fn with_data_store(self, data_store: Option<Arc<dyn StoreManager>>) -> Self {
         Self { data_store, ..self }
+    }
+
+    /// Initialize the host with the given configuration watching bundle
+    pub fn with_bundle_generator(self, bundle_generator: BundleGenerator) -> Self {
+        Self {
+            bundle_generator: Some(bundle_generator),
+            ..self
+        }
     }
 
     /// Build a new [Host] instance with the given configuration
@@ -942,7 +952,7 @@ impl HostBuilder {
             config_store: self
                 .config_store
                 .unwrap_or_else(|| Arc::new(DefaultStore::new())),
-            config_generator: config_generator.unwrap(),
+            config_generator: self.bundle_generator.unwrap(),
         };
 
         let host = Arc::new(host);

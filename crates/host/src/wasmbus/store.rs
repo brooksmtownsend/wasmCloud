@@ -1,15 +1,9 @@
 //! Module with structs for use in managing and accessing data used by various wasmCloud entities
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
+use std::collections::HashMap;
 
-use anyhow::{bail, Context};
-use async_nats::jetstream::kv::{Operation, Store};
 use bytes::Bytes;
-use futures::{future::AbortHandle, stream::Abortable, TryStreamExt};
-use tokio::sync::{
-    watch::{self, Receiver, Sender},
-    RwLock, RwLockReadGuard,
-};
-use tracing::{error, instrument, warn, Instrument};
+use tokio::sync::RwLock;
+use tracing::instrument;
 
 #[async_trait::async_trait]
 /// A trait for managing a store of data, such as a config store or a data store.

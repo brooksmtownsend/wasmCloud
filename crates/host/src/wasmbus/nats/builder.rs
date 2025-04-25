@@ -155,6 +155,7 @@ impl NatsHostBuilder {
         Ok(HostBuilder::from(config)
             .with_config_store(Some(self.config_store))
             .with_data_store(Some(self.data_store))
+            .with_bundle_generator(self.config_generator)
             .with_registry_config(self.registry_config)
             .with_event_publisher(self.event_publisher)
             .with_policy_manager(self.policy_manager)
