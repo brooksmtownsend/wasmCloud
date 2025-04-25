@@ -6,15 +6,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wascap::jwt;
 
-mod default;
-pub use default::DefaultPolicyManager;
-
-/// Pluggable NATS implementation of the policy manager
-pub mod nats;
-
 // NOTE: All requests will be v1 until the schema changes, at which point we can change the version
 // per-request type
-const POLICY_TYPE_VERSION: &str = "v1";
+pub(crate) const POLICY_TYPE_VERSION: &str = "v1";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Hash)]
 /// Claims associated with a policy request, if embedded inside the component or provider
@@ -154,15 +148,15 @@ pub(crate) struct Request {
     /// A unique request id. This value is returned in the response
     #[serde(rename = "requestId")]
     #[allow(clippy::struct_field_names)]
-    request_id: String,
+    pub(crate) request_id: String,
     /// The kind of policy request being made
-    kind: RequestKind,
+    pub(crate) kind: RequestKind,
     /// The version of the policy request body
-    version: String,
+    pub(crate) version: String,
     /// The policy request body
-    request: RequestBody,
+    pub(crate) request: RequestBody,
     /// Information about the host making the request
-    host: HostInfo,
+    pub(crate) host: HostInfo,
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
@@ -272,3 +266,14 @@ pub trait PolicyManager: Send + Sync {
         })
     }
 }
+
+/// A default policy manager that always returns true for all requests
+/// This is used when no policy manager is configured
+pub struct DefaultPolicyManager;
+impl DefaultPolicyManager {
+    /// Create a new default policy manager
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+impl super::PolicyManager for DefaultPolicyManager {}

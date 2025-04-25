@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use tracing::{instrument, trace};
 use wascap::{jwt, prelude::ClaimsBuilder};
+
 // TODO: remove StoredClaims in #1093
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]

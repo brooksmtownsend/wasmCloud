@@ -20,9 +20,7 @@ use async_nats::jetstream::kv::Store;
 use async_nats::Client;
 use bytes::{BufMut, Bytes, BytesMut};
 use claims::{Claims, StoredClaims};
-use cloudevents::{EventBuilder, EventBuilderV10};
-use ctl::nats::Queue;
-use ctl::ControlInterfaceServer;
+use event::{DefaultEventPublisher, EventPublisher};
 use futures::stream::{AbortHandle, Abortable};
 use futures::{join, stream, try_join, Stream, StreamExt, TryFutureExt as _, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -59,7 +57,9 @@ use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 
 use crate::policy::DefaultPolicyManager;
 use crate::registry::RegistryCredentialExt;
+use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::wasmbus::jetstream::create_bucket;
+use crate::wasmbus::nats::ctl::Queue;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
     fetch_component, HostMetrics, OciConfig, PolicyManager, PolicyResponse, RegistryAuth,
@@ -73,11 +73,15 @@ mod handler;
 mod jetstream;
 mod providers;
 
-pub mod config;
 /// Control interface implementation
 pub mod ctl;
+
+/// Configuration service
+pub mod config;
+
 /// wasmCloud host configuration
 pub mod host_config;
+pub mod nats;
 
 pub use self::experimental::Features;
 pub use self::host_config::Host as HostConfig;
@@ -315,7 +319,7 @@ pub struct Host {
 
     // TODO: events as trait
     // Traits
-    event_builder: EventBuilderV10,
+    pub(crate) event_publisher: Arc<dyn EventPublisher + Send + Sync>,
 
     /// NATS client to use for RPC calls
     rpc_nats: Arc<async_nats::Client>,
@@ -569,6 +573,8 @@ pub struct HostBuilder {
     config: HostConfig,
 
     // Host trait extensions
+    /// The event publisher to use for sending events
+    event_publisher: Option<Arc<dyn EventPublisher + Send + Sync>>,
     /// The policy manager to use for evaluating policy decisions
     policy_manager: Option<Arc<dyn PolicyManager + Send + Sync>>,
 
@@ -621,6 +627,17 @@ impl HostBuilder {
     pub fn with_policy_manager(self, policy_manager: Arc<dyn PolicyManager + Send + Sync>) -> Self {
         Self {
             policy_manager: Some(policy_manager),
+            ..self
+        }
+    }
+
+    /// Initialize the host with the given event publisher for sending events
+    pub fn with_event_publisher(
+        self,
+        event_publisher: Arc<dyn EventPublisher + Send + Sync>,
+    ) -> Self {
+        Self {
+            event_publisher: Some(event_publisher),
             ..self
         }
     }
@@ -708,7 +725,6 @@ impl HostBuilder {
             .experimental_features(self.config.experimental_features.into())
             .build()
             .context("failed to build runtime")?;
-        let event_builder = EventBuilderV10::new().source(host_key.public_key());
 
         let scope = InstrumentationScope::builder("wasmcloud-host")
             .with_version(self.config.version.clone())
@@ -874,7 +890,6 @@ impl HostBuilder {
         let host = Host {
             components: Arc::new(RwLock::new(HashMap::new())),
             providers: RwLock::new(HashMap::new()),
-            event_builder,
             friendly_name,
             heartbeat: heartbeat_abort.clone(),
             host_key,
@@ -898,6 +913,9 @@ impl HostBuilder {
             tasks,
             rpc_nats: Arc::new(rpc_nats),
             // NATS extension points which we have default implementations for
+            event_publisher: self
+                .event_publisher
+                .unwrap_or_else(|| Arc::new(DefaultEventPublisher::new())),
             registry_config: registry_config.unwrap_or_default(),
             policy_manager: self
                 .policy_manager
@@ -1063,8 +1081,10 @@ impl HostBuilder {
                                     }
                                 };
 
-                                if let Err(e) =
-                                    host.publish_event("host_heartbeat", heartbeat).await
+                                if let Err(e) = host
+                                    .event_publisher
+                                    .publish_event("host_heartbeat", heartbeat)
+                                    .await
                                 {
                                     error!("failed to publish heartbeat: {e}");
                                 }
@@ -1088,7 +1108,8 @@ impl HostBuilder {
             "uptime_seconds": 0,
             "version": host.host_config.version,
         });
-        host.publish_event("host_started", start_evt)
+        host.event_publisher
+            .publish_event("host_started", start_evt)
             .await
             .context("failed to publish start event")?;
         info!(
@@ -1104,14 +1125,15 @@ impl HostBuilder {
                 queue.abort();
             }
             let _ = try_join!(data_watch, heartbeat).context("failed to await tasks")?;
-            host.publish_event(
-                "host_stopped",
-                json!({
-                    "labels": *host.labels.read().await,
-                }),
-            )
-            .await
-            .context("failed to publish stop event")?;
+            host.event_publisher
+                .publish_event(
+                    "host_stopped",
+                    json!({
+                        "labels": *host.labels.read().await,
+                    }),
+                )
+                .await
+                .context("failed to publish stop event")?;
             // Before we exit, make sure to flush all messages or we may lose some that we've
             // thought were sent (like the host_stopped event)
             // TODO: flush ctl_nats when done with host
@@ -1258,20 +1280,6 @@ impl Host {
     async fn heartbeat(&self) -> anyhow::Result<serde_json::Value> {
         trace!("generating heartbeat");
         Ok(serde_json::to_value(self.inventory().await)?)
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    async fn publish_event(&self, name: &str, data: serde_json::Value) -> anyhow::Result<()> {
-        // TODO: abstract event publishing
-        // event::publish(
-        //     &self.event_builder,
-        //     &self.ctl_nats,
-        //     &self.host_config.lattice,
-        //     name,
-        //     data,
-        // )
-        // .await
-        Ok(())
     }
 
     /// Instantiate a component
@@ -1473,18 +1481,19 @@ impl Host {
             .context("failed to instantiate component")?;
 
         info!(?component_ref, "component started");
-        self.publish_event(
-            "component_scaled",
-            event::component_scaled(
-                claims.as_ref(),
-                annotations,
-                self.host_key.public_key(),
-                max_instances,
-                &component_ref,
-                &component_id,
-            ),
-        )
-        .await?;
+        self.event_publisher
+            .publish_event(
+                "component_scaled",
+                event::component_scaled(
+                    claims.as_ref(),
+                    annotations,
+                    self.host_key.public_key(),
+                    max_instances,
+                    &component_ref,
+                    &component_id,
+                ),
+            )
+            .await?;
 
         Ok(entry.insert(component))
     }
@@ -1692,6 +1701,7 @@ impl Host {
                     Err(e) => {
                         error!(%component_ref, %component_id, err = ?e, "failed to scale component");
                         if let Err(e) = self
+                            .event_publisher
                             .publish_event(
                                 "component_scale_failed",
                                 event::component_scale_failed(
@@ -1785,7 +1795,9 @@ impl Host {
             }
         };
 
-        self.publish_event("component_scaled", scaled_event).await?;
+        self.event_publisher
+            .publish_event("component_scaled", scaled_event)
+            .await?;
 
         Ok(())
     }
@@ -1851,35 +1863,37 @@ impl Host {
             };
 
             info!(%new_component_ref, "component updated");
-            self.publish_event(
-                "component_scaled",
-                event::component_scaled(
-                    new_claims.as_ref(),
-                    &component.annotations,
-                    host_id,
-                    max,
-                    new_component_ref,
-                    &component_id,
-                ),
-            )
-            .await?;
+            self.event_publisher
+                .publish_event(
+                    "component_scaled",
+                    event::component_scaled(
+                        new_claims.as_ref(),
+                        &component.annotations,
+                        host_id,
+                        max,
+                        new_component_ref,
+                        &component_id,
+                    ),
+                )
+                .await?;
 
             // TODO(#1548): If this errors, we need to rollback
             self.stop_component(&component, host_id)
                 .await
                 .context("failed to stop old component")?;
-            self.publish_event(
-                "component_scaled",
-                event::component_scaled(
-                    component.claims(),
-                    &component.annotations,
-                    host_id,
-                    0_usize,
-                    &component.image_reference,
-                    &component.id,
-                ),
-            )
-            .await?;
+            self.event_publisher
+                .publish_event(
+                    "component_scaled",
+                    event::component_scaled(
+                        component.claims(),
+                        &component.annotations,
+                        host_id,
+                        0_usize,
+                        &component.image_reference,
+                        &component.id,
+                    ),
+                )
+                .await?;
 
             component
         };
@@ -2027,17 +2041,18 @@ impl Host {
                 provider_ref = provider_ref.as_ref(),
                 provider_id, "provider started"
             );
-            self.publish_event(
-                "provider_started",
-                event::provider_started(
-                    claims.as_ref(),
-                    &annotations,
-                    host_id,
-                    &provider_ref,
-                    provider_id,
-                ),
-            )
-            .await?;
+            self.event_publisher
+                .publish_event(
+                    "provider_started",
+                    event::provider_started(
+                        claims.as_ref(),
+                        &annotations,
+                        host_id,
+                        &provider_ref,
+                        provider_id,
+                    ),
+                )
+                .await?;
 
             // Add the provider
             entry.insert(Provider {

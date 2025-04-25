@@ -92,7 +92,7 @@ impl Queue {
     }
 }
 
-impl super::Host {
+impl crate::wasmbus::Host {
     #[instrument(level = "trace", skip_all, fields(subject = %message.subject))]
     pub(crate) async fn handle_ctl_message(
         self: Arc<Self>,

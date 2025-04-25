@@ -27,8 +27,6 @@ use crate::wasmbus::{
 };
 use crate::ResourceRef;
 
-pub mod nats;
-
 /// Implementation for the server-side handling of control interface requests.
 ///
 /// This trait is not a part of the `wasmcloud_control_interface` crate yet to allow
@@ -322,6 +320,7 @@ impl ControlInterfaceServer for Host {
                 Ok((wasm, Ok(claims_token))) => (Some(wasm), claims_token, None),
                 Ok((_, Err(e))) => {
                     if let Err(e) = self
+                        .event_publisher
                         .publish_event(
                             "component_scale_failed",
                             event::component_scale_failed(
@@ -360,6 +359,7 @@ impl ControlInterfaceServer for Host {
             {
                 error!(%component_ref, %component_id, err = ?e, "failed to scale component");
                 if let Err(e) = self
+                    .event_publisher
                     .publish_event(
                         "component_scale_failed",
                         event::component_scale_failed(
@@ -525,6 +525,7 @@ impl ControlInterfaceServer for Host {
             {
                 error!(provider_ref, provider_id, ?err, "failed to start provider");
                 if let Err(err) = self
+                    .event_publisher
                     .publish_event(
                         "provider_start_failed",
                         event::provider_start_failed(provider_ref, provider_id, host_id, &err),
@@ -603,11 +604,12 @@ impl ControlInterfaceServer for Host {
         tasks.abort_all();
 
         info!(provider_id, "provider stopped");
-        self.publish_event(
-            "provider_stopped",
-            event::provider_stopped(annotations, host_id, provider_id, "stop"),
-        )
-        .await?;
+        self.event_publisher
+            .publish_event(
+                "provider_stopped",
+                event::provider_stopped(annotations, host_id, provider_id, "stop"),
+            )
+            .await?;
         Ok(CtlResponse::<()>::success(
             "successfully stopped provider".into(),
         ))
@@ -674,7 +676,8 @@ impl ControlInterfaceServer for Host {
             .await
             .context("Unable to delete config data")?;
 
-        self.publish_event("config_deleted", event::config_deleted(config_name))
+        self.event_publisher
+            .publish_event("config_deleted", event::config_deleted(config_name))
             .await?;
 
         Ok(CtlResponse::<()>::success(
@@ -706,12 +709,13 @@ impl ControlInterfaceServer for Host {
             }
         }
 
-        self.publish_event(
-            "labels_changed",
-            event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
-        )
-        .await
-        .context("failed to publish labels_changed event")?;
+        self.event_publisher
+            .publish_event(
+                "labels_changed",
+                event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
+            )
+            .await
+            .context("failed to publish labels_changed event")?;
 
         Ok(CtlResponse::<()>::success("successfully put label".into()))
     }
@@ -734,12 +738,13 @@ impl ControlInterfaceServer for Host {
         };
 
         info!(key, "removed label");
-        self.publish_event(
-            "labels_changed",
-            event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
-        )
-        .await
-        .context("failed to publish labels_changed event")?;
+        self.event_publisher
+            .publish_event(
+                "labels_changed",
+                event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
+            )
+            .await
+            .context("failed to publish labels_changed event")?;
 
         Ok(CtlResponse::<()>::success(
             "successfully deleted label".into(),
@@ -833,14 +838,16 @@ impl ControlInterfaceServer for Host {
         .await;
 
         if let Err(e) = link_set_result {
-            self.publish_event(
-                "linkdef_set_failed",
-                event::linkdef_set_failed(&request, &e),
-            )
-            .await?;
+            self.event_publisher
+                .publish_event(
+                    "linkdef_set_failed",
+                    event::linkdef_set_failed(&request, &e),
+                )
+                .await?;
             Ok(CtlResponse::error(e.to_string().as_ref()))
         } else {
-            self.publish_event("linkdef_set", event::linkdef_set(&request))
+            self.event_publisher
+                .publish_event("linkdef_set", event::linkdef_set(&request))
                 .await?;
             Ok(CtlResponse::<()>::success("successfully set link".into()))
         }
@@ -903,18 +910,19 @@ impl ControlInterfaceServer for Host {
         let deleted_link_target = deleted_link
             .as_ref()
             .map(|link| String::from(link.target()));
-        self.publish_event(
-            "linkdef_deleted",
-            event::linkdef_deleted(
-                source_id,
-                deleted_link_target.as_ref(),
-                link_name,
-                wit_namespace,
-                wit_package,
-                deleted_link.as_ref().map(|link| link.interfaces()),
-            ),
-        )
-        .await?;
+        self.event_publisher
+            .publish_event(
+                "linkdef_deleted",
+                event::linkdef_deleted(
+                    source_id,
+                    deleted_link_target.as_ref(),
+                    link_name,
+                    wit_namespace,
+                    wit_package,
+                    deleted_link.as_ref().map(|link| link.interfaces()),
+                ),
+            )
+            .await?;
 
         Ok(CtlResponse::<()>::success(
             "successfully deleted link".into(),
@@ -966,7 +974,8 @@ impl ControlInterfaceServer for Host {
             .context("unable to store config data")?;
         // We don't write it into the cached data and instead let the caching thread handle it as we
         // won't need it immediately.
-        self.publish_event("config_set", event::config_set(config_name))
+        self.event_publisher
+            .publish_event("config_set", event::config_set(config_name))
             .await?;
 
         Ok(CtlResponse::<()>::success("successfully put config".into()))

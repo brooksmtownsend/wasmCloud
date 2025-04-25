@@ -18,7 +18,7 @@ use ulid::Ulid;
 use uuid::Uuid;
 use wascap::jwt;
 
-use super::{
+use crate::policy::{
     ComponentInformation, HostInfo, PerformInvocationRequest, PolicyClaims, PolicyManager,
     ProviderInformation, Request, RequestBody, RequestKey, RequestKind, Response,
     POLICY_TYPE_VERSION,

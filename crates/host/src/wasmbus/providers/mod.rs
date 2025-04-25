@@ -15,7 +15,6 @@ use async_nats::Client;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use bytes::Bytes;
-use cloudevents::EventBuilderV10;
 use futures::{stream, Future, StreamExt};
 use nkeys::XKey;
 use tokio::io::AsyncWriteExt;
@@ -33,6 +32,7 @@ use crate::jwt;
 use crate::wasmbus::{config::ConfigBundle, Annotations};
 use crate::wasmbus::{event, injector_to_headers};
 
+use super::event::EventPublisher;
 use super::Host;
 
 mod http_server;
@@ -237,7 +237,7 @@ impl Host {
         // Spawn a task to check the health of the provider every 30 seconds
         tasks.spawn(check_health(
             Arc::clone(&self.rpc_nats),
-            self.event_builder.clone(),
+            self.event_publisher.clone(),
             Arc::clone(&self.host_config.lattice),
             self.host_key.public_key(),
             provider_id.to_string(),
@@ -426,7 +426,7 @@ async fn provider_command(path: &Path, host_data: Vec<u8>) -> anyhow::Result<pro
 /// health every 30 seconds until the health receiver gets a message to stop
 fn check_health(
     rpc_nats: Arc<Client>,
-    event_builder: EventBuilderV10,
+    event_publisher: Arc<dyn EventPublisher + Send + Sync>,
     lattice: Arc<str>,
     host_id: String,
     provider_id: String,
@@ -459,15 +459,12 @@ fn check_health(
                     (Ok(HealthCheckResponse { healthy: true, .. }), false) => {
                         trace!(?provider_id, "provider health check succeeded");
                         previous_healthy = true;
-                        if let Err(e) = event::publish(
-                            &event_builder,
-                            // TODO: this should be the ctl_nats, but it won't be an issue after we traitify
-                            &rpc_nats,
-                            &lattice,
-                            "health_check_passed",
-                            event::provider_health_check(&host_id, &provider_id),
-                        )
-                        .await
+                        if let Err(e) = event_publisher
+                            .publish_event(
+                                "health_check_passed",
+                                event::provider_health_check(&host_id, &provider_id),
+                            )
+                            .await
                         {
                             warn!(
                                 ?e,
@@ -479,14 +476,12 @@ fn check_health(
                     (Ok(HealthCheckResponse { healthy: false, .. }), true) => {
                         trace!(?provider_id, "provider health check failed");
                         previous_healthy = false;
-                        if let Err(e) = event::publish(
-                            &event_builder,
-                            &rpc_nats,
-                            &lattice,
-                            "health_check_failed",
-                            event::provider_health_check(&host_id, &provider_id),
-                        )
-                        .await
+                        if let Err(e) = event_publisher
+                            .publish_event(
+                                "health_check_failed",
+                                event::provider_health_check(&host_id, &provider_id),
+                            )
+                            .await
                         {
                             warn!(
                                 ?e,
@@ -497,14 +492,12 @@ fn check_health(
                     }
                     // If the provider health status didn't change, we simply publish a health check status event
                     (Ok(_), _) => {
-                        if let Err(e) = event::publish(
-                            &event_builder,
-                            &rpc_nats,
-                            &lattice,
-                            "health_check_status",
-                            event::provider_health_check(&host_id, &provider_id),
-                        )
-                        .await
+                        if let Err(e) = event_publisher
+                            .publish_event(
+                                "health_check_status",
+                                event::provider_health_check(&host_id, &provider_id),
+                            )
+                            .await
                         {
                             warn!(
                                 ?e,

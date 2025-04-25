@@ -18,9 +18,12 @@ use wasmcloud_core::logging::Level as WasmcloudLogLevel;
 use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
+use wasmcloud_host::wasmbus::nats::event::NatsEventPublisher;
 use wasmcloud_host::wasmbus::{connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
-use wasmcloud_host::{NatsPolicyManager, PolicyHostInfo, PolicyManager, WasmbusHostConfig};
+use wasmcloud_host::{
+    wasmbus::nats::policy::NatsPolicyManager, PolicyHostInfo, PolicyManager, WasmbusHostConfig,
+};
 use wasmcloud_tracing::configure_observability;
 
 #[derive(Debug, Parser)]
@@ -539,6 +542,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?,
     );
+
+    let event_publisher = Arc::new(NatsEventPublisher::new(
+        host_key.clone().unwrap().public_key(),
+        args.lattice.clone(),
+        ctl_nats.clone(),
+    ));
     let (host, shutdown) = Box::pin(
         wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
             lattice: Arc::from(args.lattice.clone()),
@@ -571,6 +580,7 @@ async fn main() -> anyhow::Result<()> {
             enable_component_auction: args.enable_component_auction.unwrap_or(true),
             enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
         })
+        .with_event_publisher(event_publisher)
         .with_policy_manager(policy_manager)
         .with_control_nats(ctl_nats, Some(args.ctl_topic_prefix.clone()))
         .build(),

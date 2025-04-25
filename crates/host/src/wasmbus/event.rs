@@ -1,12 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::Context;
-use cloudevents::{EventBuilder, EventBuilderV10};
 use serde_json::json;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tracing::{instrument, warn};
-use ulid::Ulid;
-use uuid::Uuid;
 use wascap::jwt;
 use wasmcloud_control_interface::Link;
 
@@ -267,38 +261,27 @@ pub fn labels_changed(
     })
 }
 
-#[instrument(level = "debug", skip(event_builder, ctl_nats, data))]
-pub(crate) async fn publish(
-    event_builder: &EventBuilderV10,
-    ctl_nats: &async_nats::Client,
-    lattice: &str,
-    name: &str,
-    data: serde_json::Value,
-) -> anyhow::Result<()> {
-    let now = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .context("failed to format current time")?;
-    let ev = event_builder
-        .clone()
-        .ty(format!("com.wasmcloud.lattice.{name}"))
-        .id(Uuid::from_u128(Ulid::new().into()).to_string())
-        .time(now)
-        .data("application/json", data)
-        .build()
-        .context("failed to build cloud event")?;
-    let ev = serde_json::to_vec(&ev).context("failed to serialize event")?;
-    let max_payload = ctl_nats.server_info().max_payload;
-    if ev.len() > max_payload {
-        warn!(
-            size = ev.len(),
-            max_size = max_payload,
-            event = name,
-            lattice = lattice,
-            "event payload is too large to publish and may fail",
-        );
+/// A trait for publishing wasmbus events. This can be implemented by any transport or bus
+/// implementation that can send the serialized event to the appropriate destination.
+///
+/// TODO(brooksmtownsend): file an issue for this: This trait can certainly be enhanced by adding methods specific to the event
+#[async_trait::async_trait]
+pub trait EventPublisher {
+    async fn publish_event(
+        &self,
+        _event_name: &str,
+        _data: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
-    ctl_nats
-        .publish(format!("wasmbus.evt.{lattice}.{name}"), ev.into())
-        .await
-        .with_context(|| format!("failed to publish `{name}` event"))
+}
+
+/// A default implementation of the EventPublisher trait that does nothing.
+/// This is useful for testing or when no event publishing is required.
+pub struct DefaultEventPublisher {}
+impl EventPublisher for DefaultEventPublisher {}
+impl DefaultEventPublisher {
+    pub fn new() -> Self {
+        DefaultEventPublisher {}
+    }
 }
