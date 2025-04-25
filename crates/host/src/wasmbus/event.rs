@@ -266,7 +266,7 @@ pub fn labels_changed(
 ///
 /// TODO(brooksmtownsend): file an issue for this: This trait can certainly be enhanced by adding methods specific to the event
 #[async_trait::async_trait]
-pub trait EventPublisher {
+pub trait EventPublisher: Send + Sync {
     async fn publish_event(
         &self,
         _event_name: &str,

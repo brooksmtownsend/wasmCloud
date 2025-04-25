@@ -24,11 +24,13 @@ use event::{DefaultEventPublisher, EventPublisher};
 use futures::stream::{AbortHandle, Abortable};
 use futures::{join, stream, try_join, Stream, StreamExt, TryFutureExt as _, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use nats::secrets::NatsSecretsManager;
 use nkeys::{KeyPair, KeyPairType, XKey};
 use providers::Provider;
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use store::{DefaultStore, StoreManager};
 use sysinfo::System;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpListener;
@@ -57,13 +59,14 @@ use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 
 use crate::policy::DefaultPolicyManager;
 use crate::registry::RegistryCredentialExt;
+use crate::secrets::{DefaultSecretsManager, SecretsManager};
 use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::wasmbus::jetstream::create_bucket;
 use crate::wasmbus::nats::ctl::Queue;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
     fetch_component, HostMetrics, OciConfig, PolicyManager, PolicyResponse, RegistryAuth,
-    RegistryConfig, RegistryType, ResourceRef, SecretsManager,
+    RegistryConfig, RegistryType, ResourceRef,
 };
 
 mod claims;
@@ -78,6 +81,9 @@ pub mod ctl;
 
 /// Configuration service
 pub mod config;
+
+/// Data store abstraction
+pub mod store;
 
 /// wasmCloud host configuration
 pub mod host_config;
@@ -284,58 +290,101 @@ impl wrpc_transport::Serve for WrpcServer {
 }
 
 /// wasmCloud Host
+/// Represents the core host structure for managing components, providers, links, and other
+/// functionalities in a wasmCloud host environment.
 pub struct Host {
-    // Core host properties
+    /// A user-friendly name for the host.
     friendly_name: String,
+
+    /// Handle to abort the heartbeat task.
     heartbeat: AbortHandle,
+
+    /// Configuration settings for the host.
     host_config: HostConfig,
+
+    /// The cryptographic key pair associated with the host.
     host_key: Arc<KeyPair>,
+
+    /// The JWT token representing the host's identity.
     host_token: Arc<jwt::Token<jwt::Host>>,
+
+    /// A map of labels associated with the host, used for metadata and identification.
     labels: Arc<RwLock<BTreeMap<String, String>>>,
+
+    /// The maximum allowed execution time for tasks within the host.
     max_execution_time: Duration,
+
+    /// The timestamp indicating when the host started.
     start_at: Instant,
-    /// A channel to send a stop event to the host
+
+    /// A channel to send a stop event to the host, signaling it to shut down.
     pub stop_tx: watch::Sender<Option<Instant>>,
-    /// A channel to receive a stop event from the host
+
+    /// A channel to receive a stop event from the host, signaling it to shut down.
     pub stop_rx: watch::Receiver<Option<Instant>>,
-    /// Experimental features to enable in the host that gate functionality
+
+    /// Experimental features enabled in the host for gated functionality.
     experimental_features: Features,
+
+    /// Indicates whether the host is ready to process requests.
     ready: Arc<AtomicBool>,
-    /// The Xkey used to encrypt secrets when sending them over NATS
+
+    /// The encryption key used to secure secrets when transmitting over NATS.
     secrets_xkey: Arc<XKey>,
 
-    // Managed host things
+    /// A map of components managed by the host, keyed by their component IDs.
     components: Arc<RwLock<HashMap<ComponentId, Arc<Component>>>>,
-    component_claims: Arc<RwLock<HashMap<ComponentId, jwt::Claims<jwt::Component>>>>, // TODO: use a single map once Claims is an enum
-    // Component ID -> All Links
+
+    /// A map of claims associated with components, keyed by their component IDs.
+    component_claims: Arc<RwLock<HashMap<ComponentId, jwt::Claims<jwt::Component>>>>,
+
+    /// A map of component IDs to their associated links.
     links: RwLock<HashMap<String, Vec<Link>>>,
+
+    /// A map of messaging links for NATS clients, organized by component and link names.
     messaging_links:
         Arc<RwLock<HashMap<Arc<str>, Arc<RwLock<HashMap<Box<str>, async_nats::Client>>>>>>,
+
+    /// A map of providers managed by the host, keyed by their identifiers.
     providers: RwLock<HashMap<String, Provider>>,
+
+    /// A map of claims associated with capability providers, keyed by their identifiers.
     provider_claims: Arc<RwLock<HashMap<String, jwt::Claims<jwt::CapabilityProvider>>>>,
+
+    /// The runtime environment used by the host for executing tasks.
     runtime: Runtime,
-    // Optional overrides for registry configuration
+
+    /// Optional overrides for registry configuration settings.
     registry_config: RwLock<HashMap<String, RegistryConfig>>,
 
-    // TODO: events as trait
-    // Traits
-    pub(crate) event_publisher: Arc<dyn EventPublisher + Send + Sync>,
-
-    /// NATS client to use for RPC calls
+    /// The NATS client used for making RPC calls.
     rpc_nats: Arc<async_nats::Client>,
-    /// Task to watch for changes in the LATTICEDATA store
+
+    /// Handle to abort the task watching for changes in the LATTICEDATA store.
     data_watch: AbortHandle,
 
-    // NATS extension points
-    config_data: Store,
-    config_generator: BundleGenerator,
-    data: Store,
-    policy_manager: Arc<dyn PolicyManager + Send + Sync>,
-    secrets_manager: Arc<SecretsManager>,
-
-    // OTEL
+    /// Configured OpenTelemetry metrics for monitoring the host.
     metrics: Arc<HostMetrics>,
-    /// A set of host tasks
+
+    /// The event publisher used for emitting events from the host.
+    pub(crate) event_publisher: Arc<dyn EventPublisher + Send + Sync>,
+
+    /// The policy manager used for evaluating policy decisions.
+    policy_manager: Arc<dyn PolicyManager + Send + Sync>,
+
+    /// The secrets manager used for managing and retrieving secrets.
+    secrets_manager: Arc<dyn SecretsManager + Send + Sync>,
+
+    /// The configuration manager for managing component, provider, link, and secret configurations.
+    config_store: Arc<dyn StoreManager + Send + Sync>,
+
+    /// The data store for managing links, claims, and component specifications.
+    data_store: Arc<dyn StoreManager + Send + Sync>,
+
+    /// The generator for creating configuration bundles.
+    config_generator: BundleGenerator,
+
+    /// A set of tasks managed by the host.
     #[allow(unused)]
     tasks: JoinSet<()>,
 }
@@ -505,10 +554,10 @@ async fn load_supplemental_config(
 
 #[instrument(level = "debug", skip_all)]
 async fn merge_registry_config(
-    registry_config: &RwLock<HashMap<String, RegistryConfig>>,
+    registry_config: &mut HashMap<String, RegistryConfig>,
     oci_opts: OciConfig,
-) -> () {
-    let mut registry_config = registry_config.write().await;
+) {
+    // let mut registry_config = registry_config.write().await;
     let allow_latest = oci_opts.allow_latest;
     let additional_ca_paths = oci_opts.additional_ca_paths;
 
@@ -572,15 +621,20 @@ async fn merge_registry_config(
 pub struct HostBuilder {
     config: HostConfig,
 
-    // Host trait extensions
-    /// The event publisher to use for sending events
-    event_publisher: Option<Arc<dyn EventPublisher + Send + Sync>>,
-    /// The policy manager to use for evaluating policy decisions
-    policy_manager: Option<Arc<dyn PolicyManager + Send + Sync>>,
+    /// Additional configuration of OCI registries
+    registry_config: HashMap<String, RegistryConfig>,
 
-    // NATS extensions
-    ctl_nats: Option<async_nats::Client>,
-    ctl_topic_prefix: Option<String>,
+    // Host trait extensions
+    /// The configuration store to use for managing configuration data
+    config_store: Option<Arc<dyn StoreManager>>,
+    /// The data store to use for managing data
+    data_store: Option<Arc<dyn StoreManager>>,
+    /// The event publisher to use for sending events
+    event_publisher: Option<Arc<dyn EventPublisher>>,
+    /// The policy manager to use for evaluating policy decisions
+    policy_manager: Option<Arc<dyn PolicyManager>>,
+    /// The secrets manager to use for managing secrets
+    secrets_manager: Option<Arc<dyn SecretsManager>>,
 }
 
 impl HostBuilder {
@@ -623,38 +677,49 @@ impl HostBuilder {
         HostBuilder::default()
     }
 
-    /// Initialize the host with the given policy manager for evaluating policy decisions
-    pub fn with_policy_manager(self, policy_manager: Arc<dyn PolicyManager + Send + Sync>) -> Self {
-        Self {
-            policy_manager: Some(policy_manager),
-            ..self
-        }
-    }
-
     /// Initialize the host with the given event publisher for sending events
-    pub fn with_event_publisher(
-        self,
-        event_publisher: Arc<dyn EventPublisher + Send + Sync>,
-    ) -> Self {
+    pub fn with_event_publisher(self, event_publisher: Option<Arc<dyn EventPublisher>>) -> Self {
         Self {
-            event_publisher: Some(event_publisher),
+            event_publisher,
             ..self
         }
     }
 
-    /// Initialize the host with the NATS control interface connection
-    ///
-    /// NATS URL to connect to for control interface connection
-    /// Authentication JWT for control interface connection, must be specified with `ctl_key`
-    /// Authentication key pair for control interface connection, must be specified with `ctl_jwt`
-    /// Whether to require TLS for control interface connection
-    /// The topic prefix to use for control interface subscriptions, defaults to `wasmbus.ctl`
-    pub fn with_control_nats(self, ctl_nats: Client, ctl_topic_prefix: Option<String>) -> Self {
-        HostBuilder {
-            ctl_nats: Some(ctl_nats),
-            ctl_topic_prefix,
+    /// Initialize the host with the given policy manager for evaluating policy decisions
+    pub fn with_policy_manager(self, policy_manager: Option<Arc<dyn PolicyManager>>) -> Self {
+        Self {
+            policy_manager,
             ..self
         }
+    }
+
+    /// Initialize the host with the given registry configuration
+    pub fn with_registry_config(self, registry_config: HashMap<String, RegistryConfig>) -> Self {
+        Self {
+            registry_config,
+            ..self
+        }
+    }
+
+    /// Initialize the host with the given secrets manager for managing secrets
+    pub fn with_secrets_manager(self, secrets_manager: Option<Arc<dyn SecretsManager>>) -> Self {
+        Self {
+            secrets_manager,
+            ..self
+        }
+    }
+
+    /// Initialize the host with the given configuration store
+    pub fn with_config_store(self, config_store: Option<Arc<dyn StoreManager>>) -> Self {
+        Self {
+            config_store,
+            ..self
+        }
+    }
+
+    /// Initialize the host with the given data store
+    pub fn with_data_store(self, data_store: Option<Arc<dyn StoreManager>>) -> Self {
+        Self { data_store, ..self }
     }
 
     /// Build a new [Host] instance with the given configuration
@@ -831,59 +896,6 @@ impl HostBuilder {
         let (data_watch_abort, data_watch_abort_reg) = AbortHandle::new_pair();
         let start_at = Instant::now();
 
-        let (data, config_data, config_generator, secrets_manager, registry_config) =
-            if let Some(ctl_nats) = self.ctl_nats.clone() {
-                let ctl_jetstream = if let Some(domain) = self.config.js_domain.as_ref() {
-                    async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
-                } else {
-                    async_nats::jetstream::new(ctl_nats.clone())
-                };
-                let bucket = format!("LATTICEDATA_{}", self.config.lattice);
-                let data = create_bucket(&ctl_jetstream, &bucket).await?;
-
-                let config_bucket = format!("CONFIGDATA_{}", self.config.lattice);
-                let config_data = create_bucket(&ctl_jetstream, &config_bucket).await?;
-
-                let supplemental_config = if self.config.config_service_enabled {
-                    load_supplemental_config(&ctl_nats, &self.config.lattice, &labels).await?
-                } else {
-                    SupplementalConfig::default()
-                };
-
-                let registry_config =
-                    RwLock::new(supplemental_config.registry_config.unwrap_or_default());
-                merge_registry_config(&registry_config, self.config.oci_opts.clone()).await;
-
-                // If provided, secrets topic must be non-empty
-                // TODO(#2411): Validate secrets topic prefix as a valid NATS subject
-                ensure!(
-                    self.config.secrets_topic_prefix.is_none()
-                        || self
-                            .config
-                            .secrets_topic_prefix
-                            .as_ref()
-                            .is_some_and(|topic| !topic.is_empty()),
-                    "secrets topic prefix must be non-empty"
-                );
-
-                let secrets_manager = Arc::new(SecretsManager::new(
-                    &config_data,
-                    self.config.secrets_topic_prefix.as_ref(),
-                    &ctl_nats,
-                ));
-
-                let config_generator = BundleGenerator::new(config_data.clone());
-                (
-                    Some(data),
-                    Some(config_data),
-                    Some(config_generator),
-                    Some(secrets_manager),
-                    Some(registry_config),
-                )
-            } else {
-                (None, None, None, None, None)
-            };
-
         let enable_component_auction = self.config.enable_component_auction;
         let enable_provider_auction = self.config.enable_provider_auction;
 
@@ -912,147 +924,28 @@ impl HostBuilder {
             ready: Arc::clone(&ready),
             tasks,
             rpc_nats: Arc::new(rpc_nats),
-            // NATS extension points which we have default implementations for
+            // Extension traits that we fallback to defaults for
             event_publisher: self
                 .event_publisher
                 .unwrap_or_else(|| Arc::new(DefaultEventPublisher::new())),
-            registry_config: registry_config.unwrap_or_default(),
+            registry_config: RwLock::new(self.registry_config),
             policy_manager: self
                 .policy_manager
                 .unwrap_or_else(|| Arc::new(DefaultPolicyManager::new())),
+            secrets_manager: self
+                .secrets_manager
+                .unwrap_or_else(|| Arc::new(DefaultSecretsManager::new())),
             // NATS extension points which we assume exist
-            data: data.unwrap(),
-            config_data: config_data.unwrap(),
+            data_store: self
+                .data_store
+                .unwrap_or_else(|| Arc::new(DefaultStore::new())),
+            config_store: self
+                .config_store
+                .unwrap_or_else(|| Arc::new(DefaultStore::new())),
             config_generator: config_generator.unwrap(),
-            secrets_manager: secrets_manager.unwrap(),
         };
 
         let host = Arc::new(host);
-
-        let nats_control_queue = if let (Some(ctl_nats), Some(ctl_topic_prefix)) =
-            (self.ctl_nats, self.ctl_topic_prefix)
-        {
-            let queue = Queue::new(
-                &ctl_nats,
-                &ctl_topic_prefix,
-                &host.host_config.lattice,
-                &host.host_key,
-                enable_component_auction,
-                enable_provider_auction,
-            )
-            .await
-            .context("failed to initialize queue")?;
-
-            let queue = spawn({
-                let ctl_nats = Arc::new(ctl_nats.clone());
-                let host = Arc::clone(&host);
-                async move {
-                    queue
-                    .for_each_concurrent(None, {
-                        let host = Arc::clone(&host);
-                        let ctl_nats = Arc::clone(&ctl_nats);
-                        move |msg| {
-                            let host = Arc::clone(&host);
-                            let ctl_nats = Arc::clone(&ctl_nats);
-                            async move {
-                                let msg_subject = msg.subject.clone();
-                                let msg_reply = msg.reply.clone();
-                                let payload = host.handle_ctl_message(msg).await;
-                                if let Some(reply) = msg_reply {
-                                    // TODO: ensure this is instrumented properly
-                                    let headers = injector_to_headers(&TraceContextInjector::default_with_span());
-                                    if let Some(payload) = payload {
-                                        let max_payload = ctl_nats.server_info().max_payload;
-                                        if payload.len() > max_payload {
-                                            warn!(
-                                                size = payload.len(),
-                                                max_size = max_payload,
-                                                "ctl response payload is too large to publish and may fail",
-                                            );
-                                        }
-                                        if let Err(err) =
-                                            ctl_nats
-                                            .publish_with_headers(reply.clone(), headers, payload)
-                                            .err_into::<anyhow::Error>()
-                                            .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
-                                            .await
-                                        {
-                                            tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .await;
-
-                    let deadline = { *host.stop_rx.borrow() };
-                    host.stop_tx.send_replace(deadline);
-                }
-            });
-
-            Some(queue)
-        } else {
-            None
-        };
-
-        let data_watch: JoinHandle<anyhow::Result<_>> = spawn({
-            let host = Arc::clone(&host);
-            let data = host.data.clone();
-            async move {
-                // Setup data watch first
-                let data_watch = data
-                    .watch_all()
-                    .await
-                    .context("failed to watch lattice data bucket")?;
-
-                // Process existing data without emitting events
-                data.keys()
-                    .await
-                    .context("failed to read keys of lattice data bucket")?
-                    .map_err(|e| anyhow!(e).context("failed to read lattice data stream"))
-                    .try_filter_map(|key| async {
-                        data.entry(key)
-                            .await
-                            .context("failed to get entry in lattice data bucket")
-                    })
-                    .for_each(|entry| async {
-                        match entry {
-                            Ok(entry) => host.process_entry(entry).await,
-                            Err(err) => {
-                                error!(%err, "failed to read entry from lattice data bucket")
-                            }
-                        }
-                    })
-                    .await;
-                let mut data_watch = Abortable::new(data_watch, data_watch_abort_reg);
-                data_watch
-                    .by_ref()
-                    .for_each({
-                        let host = Arc::clone(&host);
-                        move |entry| {
-                            let host = Arc::clone(&host);
-                            async move {
-                                match entry {
-                                    Err(error) => {
-                                        error!("failed to watch lattice data bucket: {error}");
-                                    }
-                                    Ok(entry) => host.process_entry(entry).await,
-                                }
-                            }
-                        }
-                    })
-                    .await;
-                let deadline = { *host.stop_rx.borrow() };
-                host.stop_tx.send_replace(deadline);
-                if data_watch.is_aborted() {
-                    info!("data watch task gracefully stopped");
-                } else {
-                    error!("data watch task unexpectedly stopped");
-                }
-                Ok(())
-            }
-        });
 
         let heartbeat_interval = host
             .host_config
@@ -1121,10 +1014,8 @@ impl HostBuilder {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
             data_watch_abort.abort();
-            if let Some(queue) = nats_control_queue {
-                queue.abort();
-            }
-            let _ = try_join!(data_watch, heartbeat).context("failed to await tasks")?;
+            // TODO: consider giving the abstractions a way to return a handle
+            let _ = heartbeat.await.context("failed to await heartbeat")?;
             host.event_publisher
                 .publish_event(
                     "host_stopped",
@@ -2345,7 +2236,7 @@ impl Host {
     where
         I: IntoIterator<Item: AsRef<str>>,
     {
-        let config_store = self.config_data.clone();
+        let config_store = self.config_store.clone();
         let validation_errors =
             futures::future::join_all(config_names.into_iter().map(|config_name| {
                 let config_store = config_store.clone();

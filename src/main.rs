@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use clap::{ArgAction, Parser};
 use nkeys::KeyPair;
 use regex::Regex;
@@ -18,7 +18,9 @@ use wasmcloud_core::logging::Level as WasmcloudLogLevel;
 use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
+use wasmcloud_host::wasmbus::nats::builder::NatsHostBuilder;
 use wasmcloud_host::wasmbus::nats::event::NatsEventPublisher;
+use wasmcloud_host::wasmbus::nats::secrets::NatsSecretsManager;
 use wasmcloud_host::wasmbus::{connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
 use wasmcloud_host::{
@@ -505,6 +507,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // NOTE(brooksmtownsend): Summing the feature flags "OR"s the multiple flags together.
     let experimental_features: Features = args.experimental_features.into_iter().sum();
     let workload_identity_config = if experimental_features.workload_identity_auth_enabled() {
         Some(WorkloadIdentityConfig::from_env()?)
@@ -522,68 +525,51 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("failed to establish NATS control connection")?;
 
-    if let Some(policy_topic) = args.policy_topic.as_deref() {
-        anyhow::ensure!(
-            validate_nats_subject(policy_topic).is_ok(),
-            "Invalid policy topic"
-        );
-    }
-    let policy_manager: Arc<dyn PolicyManager> = Arc::new(
-        NatsPolicyManager::new(
-            ctl_nats.clone(),
-            PolicyHostInfo {
-                public_key: host_key.clone().unwrap().public_key(),
-                lattice: args.lattice.to_string(),
-                labels: HashMap::from_iter(labels.clone()),
-            },
-            args.policy_topic,
-            args.policy_timeout_ms,
-            args.policy_changes_topic,
-        )
-        .await?,
-    );
+    let builder = NatsHostBuilder::new(
+        ctl_nats,
+        args.ctl_topic_prefix,
+        args.lattice,
+        args.js_domain,
+        args.config_service_enabled,
+        oci_opts,
+        labels,
+    )
+    .await?;
 
-    let event_publisher = Arc::new(NatsEventPublisher::new(
-        host_key.clone().unwrap().public_key(),
-        args.lattice.clone(),
-        ctl_nats.clone(),
-    ));
     let (host, shutdown) = Box::pin(
-        wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
-            lattice: Arc::from(args.lattice.clone()),
-            host_key: host_key.clone(),
-            config_service_enabled: args.config_service_enabled,
-            js_domain: args.js_domain,
-            labels,
-            provider_shutdown_delay: Some(args.provider_shutdown_delay),
-            oci_opts,
-            rpc_nats_url,
-            rpc_timeout: args.rpc_timeout_ms,
-            rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
-            rpc_key: rpc_key.or_else(|| nats_key.clone()),
-            rpc_tls: args.rpc_tls,
-            allow_file_load: args.allow_file_load,
-            log_level,
-            enable_structured_logging: args.enable_structured_logging,
-            otel_config,
-            secrets_topic_prefix: args.secrets_topic_prefix,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            max_execution_time: args.max_execution_time,
-            max_linear_memory: args.max_linear_memory,
-            max_component_size: args.max_component_size,
-            max_components: args.max_components,
-            max_core_instances_per_component: args.max_core_instances_per_component,
-            heartbeat_interval: args.heartbeat_interval,
-            // NOTE(brooks): Summing the feature flags "OR"s the multiple flags together.
-            experimental_features,
-            http_admin: args.http_admin,
-            enable_component_auction: args.enable_component_auction.unwrap_or(true),
-            enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
-        })
-        .with_event_publisher(event_publisher)
-        .with_policy_manager(policy_manager)
-        .with_control_nats(ctl_nats, Some(args.ctl_topic_prefix.clone()))
-        .build(),
+        builder
+            .build(WasmbusHostConfig {
+                lattice: Arc::from(args.lattice.clone()),
+                host_key: host_key.clone(),
+                config_service_enabled: args.config_service_enabled,
+                js_domain: args.js_domain,
+                labels,
+                provider_shutdown_delay: Some(args.provider_shutdown_delay),
+                oci_opts,
+                rpc_nats_url,
+                rpc_timeout: args.rpc_timeout_ms,
+                rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
+                rpc_key: rpc_key.or_else(|| nats_key.clone()),
+                rpc_tls: args.rpc_tls,
+                allow_file_load: args.allow_file_load,
+                log_level,
+                enable_structured_logging: args.enable_structured_logging,
+                otel_config,
+                secrets_topic_prefix: args.secrets_topic_prefix,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                max_execution_time: args.max_execution_time,
+                max_linear_memory: args.max_linear_memory,
+                max_component_size: args.max_component_size,
+                max_components: args.max_components,
+                max_core_instances_per_component: args.max_core_instances_per_component,
+                heartbeat_interval: args.heartbeat_interval,
+                experimental_features,
+                http_admin: args.http_admin,
+                enable_component_auction: args.enable_component_auction.unwrap_or(true),
+                enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
+            })
+            .await?
+            .build(),
     )
     .await
     .context("failed to initialize host")?;

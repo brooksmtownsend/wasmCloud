@@ -52,8 +52,8 @@ impl super::Host {
     ) -> anyhow::Result<Option<ComponentSpecification>> {
         let key = format!("COMPONENT_{id}");
         let spec = self
-            .data
-            .get(key)
+            .data_store
+            .get(&key)
             .await
             .context("failed to get component spec")?
             .map(|spec_bytes| serde_json::from_slice(&spec_bytes))
@@ -75,8 +75,8 @@ impl super::Host {
         let bytes = serde_json::to_vec(spec)
             .context("failed to serialize component spec")?
             .into();
-        self.data
-            .put(key, bytes)
+        self.data_store
+            .put(&key, bytes)
             .await
             .context("failed to put component spec")?;
         Ok(())

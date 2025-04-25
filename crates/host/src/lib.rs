@@ -27,7 +27,6 @@ pub mod workload_identity;
 pub use metrics::HostMetrics;
 pub use oci::Config as OciConfig;
 pub use policy::{HostInfo as PolicyHostInfo, PolicyManager, Response as PolicyResponse};
-pub use secrets::Manager as SecretsManager;
 pub use wasmbus::{Host as WasmbusHost, HostConfig as WasmbusHostConfig};
 pub use wasmcloud_core::{OciFetcher, RegistryAuth, RegistryConfig, RegistryType};
 

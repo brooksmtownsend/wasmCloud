@@ -655,7 +655,7 @@ impl ControlInterfaceServer for Host {
     #[instrument(level = "trace", skip(self))]
     async fn handle_config_get(&self, config_name: &str) -> anyhow::Result<Vec<u8>> {
         trace!(%config_name, "handling get config");
-        if let Some(config_bytes) = self.config_data.get(config_name).await? {
+        if let Some(config_bytes) = self.config_store.get(config_name).await? {
             let config_map: HashMap<String, String> = serde_json::from_slice(&config_bytes)
                 .context("config data should be a map of string -> string")?;
             serde_json::to_vec(&CtlResponse::ok(config_map)).map_err(anyhow::Error::from)
@@ -671,8 +671,8 @@ impl ControlInterfaceServer for Host {
     async fn handle_config_delete(&self, config_name: &str) -> anyhow::Result<CtlResponse<()>> {
         debug!("handle config entry deletion");
 
-        self.config_data
-            .purge(config_name)
+        self.config_store
+            .del(config_name)
             .await
             .context("Unable to delete config data")?;
 
@@ -968,7 +968,7 @@ impl ControlInterfaceServer for Host {
         // Validate that the data is of the proper type by deserialing it
         serde_json::from_slice::<HashMap<String, String>>(&data)
             .context("config data should be a map of string -> string")?;
-        self.config_data
+        self.config_store
             .put(config_name, data)
             .await
             .context("unable to store config data")?;

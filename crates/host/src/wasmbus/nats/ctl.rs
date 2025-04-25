@@ -260,3 +260,70 @@ impl crate::wasmbus::Host {
         }
     }
 }
+
+// let nats_control_queue = if let (Some(ctl_nats), Some(ctl_topic_prefix)) =
+//     (self.ctl_nats, self.ctl_topic_prefix)
+// {
+//     let queue = Queue::new(
+//         &ctl_nats,
+//         &ctl_topic_prefix,
+//         &host.host_config.lattice,
+//         &host.host_key,
+//         enable_component_auction,
+//         enable_provider_auction,
+//     )
+//     .await
+//     .context("failed to initialize queue")?;
+
+//     let queue = spawn({
+//         let ctl_nats = Arc::new(ctl_nats.clone());
+//         let host = Arc::clone(&host);
+//         async move {
+//             queue
+//             .for_each_concurrent(None, {
+//                 let host = Arc::clone(&host);
+//                 let ctl_nats = Arc::clone(&ctl_nats);
+//                 move |msg| {
+//                     let host = Arc::clone(&host);
+//                     let ctl_nats = Arc::clone(&ctl_nats);
+//                     async move {
+//                         let msg_subject = msg.subject.clone();
+//                         let msg_reply = msg.reply.clone();
+//                         let payload = host.handle_ctl_message(msg).await;
+//                         if let Some(reply) = msg_reply {
+//                             // TODO: ensure this is instrumented properly
+//                             let headers = injector_to_headers(&TraceContextInjector::default_with_span());
+//                             if let Some(payload) = payload {
+//                                 let max_payload = ctl_nats.server_info().max_payload;
+//                                 if payload.len() > max_payload {
+//                                     warn!(
+//                                         size = payload.len(),
+//                                         max_size = max_payload,
+//                                         "ctl response payload is too large to publish and may fail",
+//                                     );
+//                                 }
+//                                 if let Err(err) =
+//                                     ctl_nats
+//                                     .publish_with_headers(reply.clone(), headers, payload)
+//                                     .err_into::<anyhow::Error>()
+//                                     .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
+//                                     .await
+//                                 {
+//                                     tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
+//                                 }
+//                             }
+//                         }
+//                     }
+//                 }
+//             })
+//             .await;
+
+//             let deadline = { *host.stop_rx.borrow() };
+//             host.stop_tx.send_replace(deadline);
+//         }
+//     });
+
+//     Some(queue)
+// } else {
+//     None
+// };

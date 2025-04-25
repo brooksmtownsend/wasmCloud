@@ -280,8 +280,8 @@ impl super::Host {
         let bytes = serde_json::to_vec(&claims)
             .context("failed to serialize claims")?
             .into();
-        self.data
-            .put(key, bytes)
+        self.data_store
+            .put(&key, bytes)
             .await
             .context("failed to put claims")?;
         Ok(())
