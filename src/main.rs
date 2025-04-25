@@ -8,11 +8,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use clap::{ArgAction, Parser};
-use futures::{TryFutureExt as _, StreamExt};
 use nkeys::KeyPair;
 use regex::Regex;
 use tokio::time::{timeout, timeout_at};
-use tokio::{select, signal, spawn};
+use tokio::{select, signal};
 use tracing::{warn, Level as TracingLogLevel};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use wasmcloud_core::logging::Level as WasmcloudLogLevel;
@@ -20,11 +19,10 @@ use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
 use wasmcloud_host::wasmbus::host_config::PolicyService as PolicyServiceConfig;
-use wasmcloud_host::wasmbus::{connect_nats, injector_to_headers, Features};
+use wasmcloud_host::wasmbus::Features;
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
 use wasmcloud_host::WasmbusHostConfig;
 use wasmcloud_tracing::configure_observability;
-use wasmcloud_tracing::context::TraceContextInjector;
 
 #[derive(Debug, Parser)]
 #[allow(clippy::struct_excessive_bools)]
@@ -521,121 +519,54 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let (host, shutdown) = Box::pin(wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
-        lattice: Arc::from(args.lattice.clone()),
-        host_key: host_key.clone(),
-        config_service_enabled: args.config_service_enabled,
-        js_domain: args.js_domain,
-        labels,
-        provider_shutdown_delay: Some(args.provider_shutdown_delay),
-        oci_opts,
-        rpc_nats_url,
-        rpc_timeout: args.rpc_timeout_ms,
-        rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
-        rpc_key: rpc_key.or_else(|| nats_key.clone()),
-        rpc_tls: args.rpc_tls,
-        allow_file_load: args.allow_file_load,
-        log_level,
-        enable_structured_logging: args.enable_structured_logging,
-        otel_config,
-        policy_service_config,
-        secrets_topic_prefix: args.secrets_topic_prefix,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        max_execution_time: args.max_execution_time,
-        max_linear_memory: args.max_linear_memory,
-        max_component_size: args.max_component_size,
-        max_components: args.max_components,
-        max_core_instances_per_component: args.max_core_instances_per_component,
-        heartbeat_interval: args.heartbeat_interval,
-        // NOTE(brooks): Summing the feature flags "OR"s the multiple flags together.
-        experimental_features,
-        http_admin: args.http_admin,
-        enable_component_auction: args.enable_component_auction.unwrap_or(true),
-        enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
-    })
-    .with_control_nats(
-        ctl_nats_url.clone(),
-        ctl_jwt.clone().or_else(|| nats_jwt.clone()),
-        ctl_key.clone().or_else(|| nats_key.clone()),
-        args.ctl_tls,
-        // TODO(brooksmtownsend): configurable request timeout?
-        None,
-        args.ctl_topic_prefix.clone(),
-        workload_identity_config.clone())
+    let (host, shutdown) = Box::pin(
+        wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
+            lattice: Arc::from(args.lattice.clone()),
+            host_key: host_key.clone(),
+            config_service_enabled: args.config_service_enabled,
+            js_domain: args.js_domain,
+            labels,
+            provider_shutdown_delay: Some(args.provider_shutdown_delay),
+            oci_opts,
+            rpc_nats_url,
+            rpc_timeout: args.rpc_timeout_ms,
+            rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
+            rpc_key: rpc_key.or_else(|| nats_key.clone()),
+            rpc_tls: args.rpc_tls,
+            allow_file_load: args.allow_file_load,
+            log_level,
+            enable_structured_logging: args.enable_structured_logging,
+            otel_config,
+            policy_service_config,
+            secrets_topic_prefix: args.secrets_topic_prefix,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            max_execution_time: args.max_execution_time,
+            max_linear_memory: args.max_linear_memory,
+            max_component_size: args.max_component_size,
+            max_components: args.max_components,
+            max_core_instances_per_component: args.max_core_instances_per_component,
+            heartbeat_interval: args.heartbeat_interval,
+            // NOTE(brooks): Summing the feature flags "OR"s the multiple flags together.
+            experimental_features,
+            http_admin: args.http_admin,
+            enable_component_auction: args.enable_component_auction.unwrap_or(true),
+            enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
+        })
+        .with_control_nats(
+            ctl_nats_url.clone(),
+            ctl_jwt.clone().or_else(|| nats_jwt.clone()),
+            ctl_key.clone().or_else(|| nats_key.clone()),
+            args.ctl_tls,
+            // TODO(brooksmtownsend): configurable request timeout?
+            None,
+            Some(args.ctl_topic_prefix.clone()),
+            workload_identity_config.clone(),
+        )
         .await?
-    .build())
+        .build(),
+    )
     .await
     .context("failed to initialize host")?;
-
-    let host = Arc::clone(&host);
-
-    let ctl_nats = Arc::new(connect_nats(
-        ctl_nats_url.as_str(),
-        ctl_jwt.or_else(|| nats_jwt.clone()).as_ref(),
-        ctl_key.or_else(|| nats_key.clone()),
-        args.ctl_tls,
-        None,
-        workload_identity_config.clone(),
-    )
-    .await
-    .context("failed to establish NATS control server connection")?);
-    let queue = wasmcloud_host::wasmbus::ctl::nats::Queue::new(
-        &ctl_nats,
-        &args.ctl_topic_prefix,
-        &args.lattice,
-        &host_key.unwrap(),
-        args.enable_component_auction.unwrap_or(true),
-        args.enable_provider_auction.unwrap_or(true),
-    )
-    .await
-    .context("failed to initialize queue")?;
-
-    let queue = spawn({
-        let host = Arc::clone(&host);
-        async move {
-            queue
-                .for_each_concurrent(None, {
-                    let host = Arc::clone(&host);
-                    let ctl_nats = Arc::clone(&ctl_nats);
-                    move |msg| {
-                        let host = Arc::clone(&host);
-                        let ctl_nats = Arc::clone(&ctl_nats);
-                        async move { 
-                            let msg_subject = msg.subject.clone();
-                            let msg_reply = msg.reply.clone();
-                            let payload = host.handle_ctl_message(msg).await;
-                            if let Some(reply) = msg_reply {
-                                // TODO: ensure this is instrumented properly
-                                let headers = injector_to_headers(&TraceContextInjector::default_with_span());
-                                if let Some(payload) = payload {
-                                    let max_payload = ctl_nats.server_info().max_payload;
-                                    if payload.len() > max_payload {
-                                        warn!(
-                                            size = payload.len(),
-                                            max_size = max_payload,
-                                            "ctl response payload is too large to publish and may fail",
-                                        );
-                                    }
-                                    if let Err(err) = 
-                                        ctl_nats
-                                        .publish_with_headers(reply.clone(), headers, payload)
-                                        .err_into::<anyhow::Error>()
-                                        .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
-                                        .await
-                                    {
-                                        tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                })
-                .await;
-
-            let deadline = { *host.stop_rx.borrow() };
-            host.stop_tx.send_replace(deadline);
-        }
-    });
 
     #[cfg(unix)]
     let deadline = {
@@ -657,7 +588,6 @@ async fn main() -> anyhow::Result<()> {
         },
         deadline = host.stopped() => deadline?,
     };
-    queue.abort();
     drop(host);
     if let Some(deadline) = deadline {
         timeout_at(deadline, shutdown)

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wascap::jwt;
 
+/// Pluggable NATS implementation of the policy manager
 pub mod nats;
 
 // NOTE: All requests will be v1 until the schema changes, at which point we can change the version
@@ -217,6 +218,7 @@ impl From<&jwt::Claims<jwt::CapabilityProvider>> for PolicyClaims {
     }
 }
 
+/// A trait for evaluating policy decisions
 #[async_trait::async_trait]
 pub trait PolicyManager: Send + Sync {
     /// Evaluate whether a component may be started

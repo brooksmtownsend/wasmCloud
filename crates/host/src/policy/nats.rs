@@ -1,3 +1,6 @@
+//! Policy manager implementation that uses NATS to send policy requests
+//! to a policy server.
+
 use core::time::Duration;
 
 use std::collections::{BTreeMap, HashMap};

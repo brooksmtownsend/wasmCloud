@@ -20,9 +20,10 @@ use async_nats::jetstream::kv::Store;
 use bytes::{BufMut, Bytes, BytesMut};
 use claims::{Claims, StoredClaims};
 use cloudevents::{EventBuilder, EventBuilderV10};
+use ctl::nats::Queue;
 use ctl::ControlInterfaceServer;
 use futures::stream::{AbortHandle, Abortable};
-use futures::{join, stream, try_join, Stream, StreamExt, TryStreamExt};
+use futures::{join, stream, try_join, Stream, StreamExt, TryFutureExt as _, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use nkeys::{KeyPair, KeyPairType, XKey};
 use providers::Provider;
@@ -566,7 +567,10 @@ async fn merge_registry_config(
 #[derive(Default)]
 pub struct HostBuilder {
     config: HostConfig,
+
+    // NATS extensions
     ctl_nats: Option<async_nats::Client>,
+    ctl_topic_prefix: Option<String>,
 }
 
 impl HostBuilder {
@@ -623,7 +627,7 @@ impl HostBuilder {
         ctl_key: Option<Arc<KeyPair>>,
         ctl_tls: bool,
         ctl_request_timeout: Option<Duration>,
-        ctl_topic_prefix: String,
+        ctl_topic_prefix: Option<String>,
         workload_identity_config: Option<WorkloadIdentityConfig>,
     ) -> anyhow::Result<Self> {
         let ctl_nats = connect_nats(
@@ -639,6 +643,7 @@ impl HostBuilder {
 
         Ok(HostBuilder {
             ctl_nats: Some(ctl_nats),
+            ctl_topic_prefix,
             ..self
         })
     }
@@ -819,7 +824,7 @@ impl HostBuilder {
         let start_at = Instant::now();
 
         let (data, config_data, config_generator, policy_manager, secrets_manager, registry_config) =
-            if let Some(ctl_nats) = self.ctl_nats {
+            if let Some(ctl_nats) = self.ctl_nats.clone() {
                 let ctl_jetstream = if let Some(domain) = self.config.js_domain.as_ref() {
                     async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
                 } else {
@@ -890,6 +895,9 @@ impl HostBuilder {
                 (None, None, None, None, None, None)
             };
 
+        let enable_component_auction = self.config.enable_component_auction;
+        let enable_provider_auction = self.config.enable_provider_auction;
+
         let host = Host {
             components: Arc::new(RwLock::new(HashMap::new())),
             providers: RwLock::new(HashMap::new()),
@@ -928,6 +936,73 @@ impl HostBuilder {
         };
 
         let host = Arc::new(host);
+
+        let nats_control_queue = if let (Some(ctl_nats), Some(ctl_topic_prefix)) =
+            (self.ctl_nats, self.ctl_topic_prefix)
+        {
+            let queue = Queue::new(
+                &ctl_nats,
+                &ctl_topic_prefix,
+                &host.host_config.lattice,
+                &host.host_key,
+                enable_component_auction,
+                enable_provider_auction,
+            )
+            .await
+            .context("failed to initialize queue")?;
+
+            let queue = spawn({
+                let ctl_nats = Arc::new(ctl_nats.clone());
+                let host = Arc::clone(&host);
+                async move {
+                    queue
+                    .for_each_concurrent(None, {
+                        let host = Arc::clone(&host);
+                        let ctl_nats = Arc::clone(&ctl_nats);
+                        move |msg| {
+                            let host = Arc::clone(&host);
+                            let ctl_nats = Arc::clone(&ctl_nats);
+                            async move {
+                                let msg_subject = msg.subject.clone();
+                                let msg_reply = msg.reply.clone();
+                                let payload = host.handle_ctl_message(msg).await;
+                                if let Some(reply) = msg_reply {
+                                    // TODO: ensure this is instrumented properly
+                                    let headers = injector_to_headers(&TraceContextInjector::default_with_span());
+                                    if let Some(payload) = payload {
+                                        let max_payload = ctl_nats.server_info().max_payload;
+                                        if payload.len() > max_payload {
+                                            warn!(
+                                                size = payload.len(),
+                                                max_size = max_payload,
+                                                "ctl response payload is too large to publish and may fail",
+                                            );
+                                        }
+                                        if let Err(err) =
+                                            ctl_nats
+                                            .publish_with_headers(reply.clone(), headers, payload)
+                                            .err_into::<anyhow::Error>()
+                                            .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
+                                            .await
+                                        {
+                                            tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .await;
+
+                    let deadline = { *host.stop_rx.borrow() };
+                    host.stop_tx.send_replace(deadline);
+                }
+            });
+
+            Some(queue)
+        } else {
+            None
+        };
 
         let data_watch: JoinHandle<anyhow::Result<_>> = spawn({
             let host = Arc::clone(&host);
@@ -1051,6 +1126,9 @@ impl HostBuilder {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
             data_watch_abort.abort();
+            if let Some(queue) = nats_control_queue {
+                queue.abort();
+            }
             let _ = try_join!(data_watch, heartbeat).context("failed to await tasks")?;
             host.publish_event(
                 "host_stopped",
@@ -2443,6 +2521,7 @@ fn human_friendly_uptime(uptime: Duration) -> String {
     .to_string()
 }
 
+/// Helper function to inject trace context into NATS headers
 pub fn injector_to_headers(injector: &TraceContextInjector) -> async_nats::header::HeaderMap {
     injector
         .iter()

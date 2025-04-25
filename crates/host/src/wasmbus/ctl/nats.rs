@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use futures::future::Either;
 use futures::stream::SelectAll;
-use futures::{Stream, StreamExt, TryFutureExt as _};
+use futures::{Stream, StreamExt};
 use nkeys::KeyPair;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,12 +12,11 @@ use std::task::{Context, Poll};
 use tracing::{error, instrument, trace, warn};
 use wasmcloud_control_interface::CtlResponse;
 use wasmcloud_core::CTL_API_VERSION_1;
-use wasmcloud_tracing::context::TraceContextInjector;
 
-use crate::wasmbus::{injector_to_headers, serialize_ctl_response};
+use crate::wasmbus::serialize_ctl_response;
 
 #[derive(Debug)]
-pub struct Queue {
+pub(crate) struct Queue {
     all_streams: SelectAll<async_nats::Subscriber>,
 }
 
@@ -31,7 +30,7 @@ impl Stream for Queue {
 
 impl Queue {
     #[instrument]
-    pub async fn new(
+    pub(crate) async fn new(
         nats: &async_nats::Client,
         topic_prefix: &str,
         lattice: &str,
@@ -95,7 +94,7 @@ impl Queue {
 
 impl super::Host {
     #[instrument(level = "trace", skip_all, fields(subject = %message.subject))]
-    pub async fn handle_ctl_message(
+    pub(crate) async fn handle_ctl_message(
         self: Arc<Self>,
         message: async_nats::Message,
     ) -> Option<Bytes> {
