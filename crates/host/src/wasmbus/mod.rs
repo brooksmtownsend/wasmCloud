@@ -21,9 +21,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use claims::{Claims, StoredClaims};
 use cloudevents::{EventBuilder, EventBuilderV10};
 use ctl::ControlInterfaceServer;
-use futures::future::Either;
-use futures::stream::{AbortHandle, Abortable, SelectAll};
-use futures::{join, stream, try_join, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use futures::stream::{AbortHandle, Abortable};
+use futures::{join, stream, try_join, Stream, StreamExt, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use nkeys::{KeyPair, KeyPairType, XKey};
 use providers::Provider;
@@ -48,7 +47,7 @@ use wasmcloud_control_interface::{
     ScaleComponentCommand, StartProviderCommand, StopHostCommand, StopProviderCommand,
     UpdateComponentCommand,
 };
-use wasmcloud_core::{ComponentId, CTL_API_VERSION_1};
+use wasmcloud_core::{secrets, ComponentId};
 use wasmcloud_runtime::capability::secrets::store::SecretValue;
 use wasmcloud_runtime::component::WrpcServeEvent;
 use wasmcloud_runtime::Runtime;
@@ -65,7 +64,6 @@ use crate::{
 };
 
 mod claims;
-mod ctl;
 mod event;
 mod experimental;
 mod handler;
@@ -73,6 +71,8 @@ mod jetstream;
 mod providers;
 
 pub mod config;
+/// Control interface implementation
+pub mod ctl;
 /// wasmCloud host configuration
 pub mod host_config;
 
@@ -85,19 +85,6 @@ use self::handler::Handler;
 
 const MAX_INVOCATION_CHANNEL_SIZE: usize = 5000;
 const MIN_INVOCATION_CHANNEL_SIZE: usize = 256;
-
-#[derive(Debug)]
-struct Queue {
-    all_streams: SelectAll<async_nats::Subscriber>,
-}
-
-impl Stream for Queue {
-    type Item = async_nats::Message;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.all_streams.poll_next_unpin(cx)
-    }
-}
 
 #[derive(Clone, Default)]
 struct AsyncBytesMut(Arc<std::sync::Mutex<BytesMut>>);
@@ -137,70 +124,6 @@ impl TryFrom<AsyncBytesMut> for Vec<u8> {
             .lock()
             .map(|buf| buf.clone().into())
             .map_err(|e| anyhow!(e.to_string()).context("failed to lock"))
-    }
-}
-
-impl Queue {
-    #[instrument]
-    async fn new(
-        nats: &async_nats::Client,
-        topic_prefix: &str,
-        lattice: &str,
-        host_key: &KeyPair,
-        component_auction: bool,
-        provider_auction: bool,
-    ) -> anyhow::Result<Self> {
-        let host_id = host_key.public_key();
-        let mut subs = vec![
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.registry.put",
-            ))),
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.host.ping",
-            ))),
-            Either::Right(nats.queue_subscribe(
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.link.*"),
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.link",),
-            )),
-            Either::Right(nats.queue_subscribe(
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.claims.get"),
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.claims"),
-            )),
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.component.*.{host_id}"
-            ))),
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.provider.*.{host_id}"
-            ))),
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.label.*.{host_id}"
-            ))),
-            Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.host.*.{host_id}"
-            ))),
-            Either::Right(nats.queue_subscribe(
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.config.>"),
-                format!("{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.config"),
-            )),
-        ];
-        if component_auction {
-            subs.push(Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.component.auction",
-            ))));
-        }
-        if provider_auction {
-            subs.push(Either::Left(nats.subscribe(format!(
-                "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.provider.auction",
-            ))));
-        }
-        let streams = futures::future::join_all(subs)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, async_nats::SubscribeError>>()
-            .context("failed to subscribe to queues")?;
-        Ok(Self {
-            all_streams: futures::stream::select_all(streams),
-        })
     }
 }
 
@@ -355,19 +278,46 @@ impl wrpc_transport::Serve for WrpcServer {
 
 /// wasmCloud Host
 pub struct Host {
-    components: Arc<RwLock<HashMap<ComponentId, Arc<Component>>>>,
-    event_builder: EventBuilderV10,
+    // Core host properties
     friendly_name: String,
     heartbeat: AbortHandle,
     host_config: HostConfig,
     host_key: Arc<KeyPair>,
     host_token: Arc<jwt::Token<jwt::Host>>,
+    labels: Arc<RwLock<BTreeMap<String, String>>>,
+    max_execution_time: Duration,
+    start_at: Instant,
+    /// A channel to send a stop event to the host
+    pub stop_tx: watch::Sender<Option<Instant>>,
+    /// A channel to receive a stop event from the host
+    pub stop_rx: watch::Receiver<Option<Instant>>,
+    /// Experimental features to enable in the host that gate functionality
+    experimental_features: Features,
+    ready: Arc<AtomicBool>,
     /// The Xkey used to encrypt secrets when sending them over NATS
     secrets_xkey: Arc<XKey>,
-    labels: Arc<RwLock<BTreeMap<String, String>>>,
+
+    // Managed host things
+    components: Arc<RwLock<HashMap<ComponentId, Arc<Component>>>>,
+    component_claims: Arc<RwLock<HashMap<ComponentId, jwt::Claims<jwt::Component>>>>, // TODO: use a single map once Claims is an enum
+    // Component ID -> All Links
+    links: RwLock<HashMap<String, Vec<Link>>>,
+    messaging_links:
+        Arc<RwLock<HashMap<Arc<str>, Arc<RwLock<HashMap<Box<str>, async_nats::Client>>>>>>,
+    providers: RwLock<HashMap<String, Provider>>,
+    provider_claims: Arc<RwLock<HashMap<String, jwt::Claims<jwt::CapabilityProvider>>>>,
+    runtime: Runtime,
+
+    // TODO: events as trait
+    // Extension points
+    policy_manager: Arc<PolicyManager>,
+    secrets_manager: Arc<SecretsManager>,
+    /// The provider map is a map of provider component ID to provider
+    registry_config: RwLock<HashMap<String, RegistryConfig>>,
+    // Traits
+    event_builder: EventBuilderV10,
+
     ctl_topic_prefix: String,
-    /// NATS client to use for control interface subscriptions and jetstream queries
-    ctl_nats: async_nats::Client,
     /// NATS client to use for RPC calls
     rpc_nats: Arc<async_nats::Client>,
     data: Store,
@@ -375,27 +325,9 @@ pub struct Host {
     data_watch: AbortHandle,
     config_data: Store,
     config_generator: BundleGenerator,
-    policy_manager: Arc<PolicyManager>,
-    secrets_manager: Arc<SecretsManager>,
-    /// The provider map is a map of provider component ID to provider
-    providers: RwLock<HashMap<String, Provider>>,
-    registry_config: RwLock<HashMap<String, RegistryConfig>>,
-    runtime: Runtime,
-    start_at: Instant,
-    stop_tx: watch::Sender<Option<Instant>>,
-    stop_rx: watch::Receiver<Option<Instant>>,
-    queue: AbortHandle,
-    // Component ID -> All Links
-    links: RwLock<HashMap<String, Vec<Link>>>,
-    component_claims: Arc<RwLock<HashMap<ComponentId, jwt::Claims<jwt::Component>>>>, // TODO: use a single map once Claims is an enum
-    provider_claims: Arc<RwLock<HashMap<String, jwt::Claims<jwt::CapabilityProvider>>>>,
+
+    // OTEL
     metrics: Arc<HostMetrics>,
-    max_execution_time: Duration,
-    messaging_links:
-        Arc<RwLock<HashMap<Arc<str>, Arc<RwLock<HashMap<Box<str>, async_nats::Client>>>>>>,
-    /// Experimental features to enable in the host that gate functionality
-    experimental_features: Features,
-    ready: Arc<AtomicBool>,
     /// A set of host tasks
     #[allow(unused)]
     tasks: JoinSet<()>,
@@ -628,7 +560,13 @@ async fn merge_registry_config(
     });
 }
 
-impl Host {
+/// HostBuilder is used to construct a new Host instance
+#[derive(Default)]
+pub struct HostBuilder {
+    config: HostConfig,
+}
+
+impl HostBuilder {
     const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
     const NAME_ADJECTIVES: &'static str = "
@@ -663,12 +601,21 @@ impl Host {
         names::Generator::new(&adjectives, &nouns, names::Name::Numbered).next()
     }
 
-    /// Construct a new [Host] returning a tuple of its [Arc] and an async shutdown function.
+    /// Create a new [HostBuilder] instance with the default configuration
+    pub fn new() -> Self {
+        HostBuilder::default()
+    }
+
+    /// Construct a new [HostBuilder] instance with the given configuration
     #[instrument(level = "debug", skip_all)]
-    pub async fn new(
-        config: HostConfig,
-    ) -> anyhow::Result<(Arc<Self>, impl Future<Output = anyhow::Result<()>>)> {
-        let host_key = if let Some(host_key) = &config.host_key {
+    pub fn from_config(config: HostConfig) -> Self {
+        HostBuilder { config }
+    }
+
+    pub async fn build(
+        self,
+    ) -> anyhow::Result<(Arc<Host>, impl Future<Output = anyhow::Result<()>>)> {
+        let host_key = if let Some(host_key) = &self.config.host_key {
             ensure!(host_key.key_pair_type() == KeyPairType::Server);
             Arc::clone(host_key)
         } else {
@@ -680,7 +627,7 @@ impl Host {
             ("hostcore.os".into(), OS.into()),
             ("hostcore.osfamily".into(), FAMILY.into()),
         ]);
-        labels.extend(config.labels.clone().into_iter());
+        labels.extend(self.config.labels.clone().into_iter());
         let friendly_name =
             Self::generate_friendly_name().context("failed to generate friendly name")?;
 
@@ -699,131 +646,92 @@ impl Host {
             .context("failed to encode host claims")?;
         let host_token = Arc::new(jwt::Token { jwt, claims });
 
-        let start_evt = json!({
-            "friendly_name": friendly_name,
-            "labels": labels,
-            "uptime_seconds": 0,
-            "version": config.version,
-        });
-
-        let workload_identity_config = if config.experimental_features.workload_identity_auth {
+        let workload_identity_config = if self.config.experimental_features.workload_identity_auth {
             Some(WorkloadIdentityConfig::from_env()?)
         } else {
             None
         };
 
-        let ((ctl_nats, queue), rpc_nats) = try_join!(
-            async {
-                debug!(
-                    ctl_nats_url = config.ctl_nats_url.as_str(),
-                    "connecting to NATS control server"
-                );
-                let ctl_nats = connect_nats(
-                    config.ctl_nats_url.as_str(),
-                    config.ctl_jwt.as_ref(),
-                    config.ctl_key.clone(),
-                    config.ctl_tls,
-                    None,
-                    workload_identity_config.clone(),
-                )
-                .await
-                .context("failed to establish NATS control server connection")?;
-                let queue = Queue::new(
-                    &ctl_nats,
-                    &config.ctl_topic_prefix,
-                    &config.lattice,
-                    &host_key,
-                    config.enable_component_auction,
-                    config.enable_provider_auction,
-                )
-                .await
-                .context("failed to initialize queue")?;
-                ctl_nats.flush().await.context("failed to flush")?;
-                Ok((ctl_nats, queue))
-            },
-            async {
-                debug!(
-                    rpc_nats_url = config.rpc_nats_url.as_str(),
-                    "connecting to NATS RPC server"
-                );
-                connect_nats(
-                    config.rpc_nats_url.as_str(),
-                    config.rpc_jwt.as_ref(),
-                    config.rpc_key.clone(),
-                    config.rpc_tls,
-                    Some(config.rpc_timeout),
-                    workload_identity_config.clone(),
-                )
-                .await
-                .context("failed to establish NATS RPC server connection")
-            }
-        )?;
-
-        let start_at = Instant::now();
-
-        let heartbeat_interval = config
-            .heartbeat_interval
-            .unwrap_or(Self::DEFAULT_HEARTBEAT_INTERVAL);
-        let heartbeat_start_at = start_at
-            .checked_add(heartbeat_interval)
-            .context("failed to compute heartbeat start time")?;
-        let heartbeat = IntervalStream::new(interval_at(heartbeat_start_at, heartbeat_interval));
+        debug!(
+            rpc_nats_url = self.config.rpc_nats_url.as_str(),
+            "connecting to NATS RPC server"
+        );
+        let rpc_nats = connect_nats(
+            self.config.rpc_nats_url.as_str(),
+            self.config.rpc_jwt.as_ref(),
+            self.config.rpc_key.clone(),
+            self.config.rpc_tls,
+            Some(self.config.rpc_timeout),
+            workload_identity_config.clone(),
+        )
+        .await
+        .context("failed to establish NATS RPC server connection")?;
 
         let (stop_tx, stop_rx) = watch::channel(None);
 
         let (runtime, _epoch) = Runtime::builder()
-            .max_execution_time(config.max_execution_time)
-            .max_linear_memory(config.max_linear_memory)
-            .max_components(config.max_components)
-            .max_core_instances_per_component(config.max_core_instances_per_component)
-            .max_component_size(config.max_component_size)
-            .experimental_features(config.experimental_features.into())
+            .max_execution_time(self.config.max_execution_time)
+            .max_linear_memory(self.config.max_linear_memory)
+            .max_components(self.config.max_components)
+            .max_core_instances_per_component(self.config.max_core_instances_per_component)
+            .max_component_size(self.config.max_component_size)
+            .experimental_features(self.config.experimental_features.into())
             .build()
             .context("failed to build runtime")?;
         let event_builder = EventBuilderV10::new().source(host_key.public_key());
 
-        let ctl_jetstream = if let Some(domain) = config.js_domain.as_ref() {
+        let ctl_nats = connect_nats(
+            self.config.ctl_nats_url.as_str(),
+            self.config.ctl_jwt.as_ref(),
+            self.config.ctl_key.clone(),
+            self.config.ctl_tls,
+            None,
+            workload_identity_config,
+        )
+        .await
+        .context("failed to establish NATS control connection")?;
+        let ctl_jetstream = if let Some(domain) = self.config.js_domain.as_ref() {
             async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
         } else {
             async_nats::jetstream::new(ctl_nats.clone())
         };
-        let bucket = format!("LATTICEDATA_{}", config.lattice);
+        let bucket = format!("LATTICEDATA_{}", self.config.lattice);
         let data = create_bucket(&ctl_jetstream, &bucket).await?;
 
-        let config_bucket = format!("CONFIGDATA_{}", config.lattice);
+        let config_bucket = format!("CONFIGDATA_{}", self.config.lattice);
         let config_data = create_bucket(&ctl_jetstream, &config_bucket).await?;
 
-        let (queue_abort, queue_abort_reg) = AbortHandle::new_pair();
-        let (heartbeat_abort, heartbeat_abort_reg) = AbortHandle::new_pair();
-        let (data_watch_abort, data_watch_abort_reg) = AbortHandle::new_pair();
-
-        let supplemental_config = if config.config_service_enabled {
-            load_supplemental_config(&ctl_nats, &config.lattice, &labels).await?
+        let supplemental_config = if self.config.config_service_enabled {
+            load_supplemental_config(&ctl_nats, &self.config.lattice, &labels).await?
         } else {
             SupplementalConfig::default()
         };
 
         let registry_config = RwLock::new(supplemental_config.registry_config.unwrap_or_default());
-        merge_registry_config(&registry_config, config.oci_opts.clone()).await;
+        merge_registry_config(&registry_config, self.config.oci_opts.clone()).await;
 
         let policy_manager = PolicyManager::new(
             ctl_nats.clone(),
             PolicyHostInfo {
                 public_key: host_key.public_key(),
-                lattice: config.lattice.to_string(),
+                lattice: self.config.lattice.to_string(),
                 labels: HashMap::from_iter(labels.clone()),
             },
-            config.policy_service_config.policy_topic.clone(),
-            config.policy_service_config.policy_timeout_ms,
-            config.policy_service_config.policy_changes_topic.clone(),
+            self.config.policy_service_config.policy_topic.clone(),
+            self.config.policy_service_config.policy_timeout_ms,
+            self.config
+                .policy_service_config
+                .policy_changes_topic
+                .clone(),
         )
         .await?;
 
         // If provided, secrets topic must be non-empty
         // TODO(#2411): Validate secrets topic prefix as a valid NATS subject
         ensure!(
-            config.secrets_topic_prefix.is_none()
-                || config
+            self.config.secrets_topic_prefix.is_none()
+                || self
+                    .config
                     .secrets_topic_prefix
                     .as_ref()
                     .is_some_and(|topic| !topic.is_empty()),
@@ -832,15 +740,15 @@ impl Host {
 
         let secrets_manager = Arc::new(SecretsManager::new(
             &config_data,
-            config.secrets_topic_prefix.as_ref(),
+            self.config.secrets_topic_prefix.as_ref(),
             &ctl_nats,
         ));
 
         let scope = InstrumentationScope::builder("wasmcloud-host")
-            .with_version(config.version.clone())
+            .with_version(self.config.version.clone())
             .with_attributes(vec![
                 KeyValue::new("host.id", host_key.public_key()),
-                KeyValue::new("host.version", config.version.clone()),
+                KeyValue::new("host.version", self.config.version.clone()),
                 KeyValue::new("host.arch", ARCH),
                 KeyValue::new("host.os", OS),
                 KeyValue::new("host.osfamily", FAMILY),
@@ -857,20 +765,17 @@ impl Host {
         let metrics = HostMetrics::new(
             &meter,
             host_key.public_key(),
-            config.lattice.to_string(),
+            self.config.lattice.to_string(),
             None,
         )
         .context("failed to create HostMetrics instance")?;
 
         let config_generator = BundleGenerator::new(config_data.clone());
 
-        let max_execution_time_ms = config.max_execution_time;
-
-        debug!("Feature flags: {:?}", config.experimental_features);
-
+        debug!("Feature flags: {:?}", self.config.experimental_features);
         let mut tasks = JoinSet::new();
         let ready = Arc::new(AtomicBool::new(true));
-        if let Some(addr) = config.http_admin {
+        if let Some(addr) = self.config.http_admin {
             let socket = TcpListener::bind(addr)
                 .await
                 .context("failed to bind on HTTP administration endpoint")?;
@@ -942,70 +847,49 @@ impl Host {
             });
         }
 
+        let (heartbeat_abort, heartbeat_abort_reg) = AbortHandle::new_pair();
+        let (data_watch_abort, data_watch_abort_reg) = AbortHandle::new_pair();
+        let start_at = Instant::now();
+
         let host = Host {
-            components: Arc::default(),
+            components: Arc::new(RwLock::new(HashMap::new())),
             event_builder,
             friendly_name,
             heartbeat: heartbeat_abort.clone(),
-            ctl_topic_prefix: config.ctl_topic_prefix.clone(),
+            ctl_topic_prefix: self.config.ctl_topic_prefix.clone(),
             host_key,
             host_token,
             secrets_xkey: Arc::new(XKey::new()),
             labels: Arc::new(RwLock::new(labels)),
-            ctl_nats,
             rpc_nats: Arc::new(rpc_nats),
-            experimental_features: config.experimental_features,
-            host_config: config,
-            data: data.clone(),
+            experimental_features: self.config.experimental_features,
+            data,
             data_watch: data_watch_abort.clone(),
-            config_data: config_data.clone(),
+            config_data,
             config_generator,
             policy_manager,
             secrets_manager,
-            providers: RwLock::default(),
+            providers: RwLock::new(HashMap::new()),
             registry_config,
             runtime,
             start_at,
             stop_rx,
             stop_tx,
-            queue: queue_abort.clone(),
-            links: RwLock::default(),
-            component_claims: Arc::default(),
-            provider_claims: Arc::default(),
+            links: RwLock::new(HashMap::new()),
+            component_claims: Arc::new(RwLock::new(HashMap::new())),
+            provider_claims: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics),
-            max_execution_time: max_execution_time_ms,
+            max_execution_time: self.config.max_execution_time,
+            host_config: self.config,
             messaging_links: Arc::default(),
             ready: Arc::clone(&ready),
             tasks,
         };
 
         let host = Arc::new(host);
-        let queue = spawn({
-            let host = Arc::clone(&host);
-            async move {
-                let mut queue = Abortable::new(queue, queue_abort_reg);
-                queue
-                    .by_ref()
-                    .for_each_concurrent(None, {
-                        let host = Arc::clone(&host);
-                        move |msg| {
-                            let host = Arc::clone(&host);
-                            async move { host.handle_ctl_message(msg).await }
-                        }
-                    })
-                    .await;
-                let deadline = { *host.stop_rx.borrow() };
-                host.stop_tx.send_replace(deadline);
-                if queue.is_aborted() {
-                    info!("control interface queue task gracefully stopped");
-                } else {
-                    error!("control interface queue task unexpectedly stopped");
-                }
-            }
-        });
 
         let data_watch: JoinHandle<anyhow::Result<_>> = spawn({
-            let data = data.clone();
+            let data = host.data.clone();
             let host = Arc::clone(&host);
             async move {
                 let data_watch = data
@@ -1041,6 +925,14 @@ impl Host {
             }
         });
 
+        let heartbeat_interval = host
+            .host_config
+            .heartbeat_interval
+            .unwrap_or(Self::DEFAULT_HEARTBEAT_INTERVAL);
+        let heartbeat_start_at = start_at
+            .checked_add(heartbeat_interval)
+            .context("failed to compute heartbeat start time")?;
+        let heartbeat = IntervalStream::new(interval_at(heartbeat_start_at, heartbeat_interval));
         let heartbeat = spawn({
             let host = Arc::clone(&host);
             async move {
@@ -1080,12 +972,14 @@ impl Host {
         });
 
         // Process existing data without emitting events
-        data.keys()
+        host.data
+            .keys()
             .await
             .context("failed to read keys of lattice data bucket")?
             .map_err(|e| anyhow!(e).context("failed to read lattice data stream"))
             .try_filter_map(|key| async {
-                data.entry(key)
+                host.data
+                    .entry(key)
                     .await
                     .context("failed to get entry in lattice data bucket")
             })
@@ -1097,6 +991,12 @@ impl Host {
             })
             .await;
 
+        let start_evt = json!({
+            "friendly_name": host.friendly_name,
+            "labels": *host.labels.read().await,
+            "uptime_seconds": 0,
+            "version": host.host_config.version,
+        });
         host.publish_event("host_started", start_evt)
             .await
             .context("failed to publish start event")?;
@@ -1108,10 +1008,9 @@ impl Host {
         Ok((Arc::clone(&host), async move {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
-            queue_abort.abort();
             data_watch_abort.abort();
             host.policy_manager.policy_changes.abort();
-            let _ = try_join!(queue, data_watch, heartbeat).context("failed to await tasks")?;
+            let _ = try_join!(data_watch, heartbeat).context("failed to await tasks")?;
             host.publish_event(
                 "host_stopped",
                 json!({
@@ -1122,10 +1021,21 @@ impl Host {
             .context("failed to publish stop event")?;
             // Before we exit, make sure to flush all messages or we may lose some that we've
             // thought were sent (like the host_stopped event)
-            try_join!(host.ctl_nats.flush(), host.rpc_nats.flush())
+            // TODO: flush ctl_nats when done with host
+            host.rpc_nats
+                .flush()
+                .await
                 .context("failed to flush NATS clients")?;
             Ok(())
         }))
+    }
+}
+
+impl Host {
+    /// Create a new HostBuilder
+    #[instrument(level = "debug", skip_all)]
+    pub fn builder() -> HostBuilder {
+        HostBuilder::default()
     }
 
     /// Waits for host to be stopped via lattice commands and returns the shutdown deadline on
@@ -1250,14 +1160,16 @@ impl Host {
 
     #[instrument(level = "debug", skip(self))]
     async fn publish_event(&self, name: &str, data: serde_json::Value) -> anyhow::Result<()> {
-        event::publish(
-            &self.event_builder,
-            &self.ctl_nats,
-            &self.host_config.lattice,
-            name,
-            data,
-        )
-        .await
+        // TODO: abstract event publishing
+        // event::publish(
+        //     &self.event_builder,
+        //     &self.ctl_nats,
+        //     &self.host_config.lattice,
+        //     name,
+        //     data,
+        // )
+        // .await
+        Ok(())
     }
 
     /// Instantiate a component
@@ -2146,192 +2058,6 @@ impl Host {
         <Self as ControlInterfaceServer>::handle_ping_hosts(self).await
     }
 
-    #[instrument(level = "trace", skip_all, fields(subject = %message.subject))]
-    async fn handle_ctl_message(self: Arc<Self>, message: async_nats::Message) {
-        // NOTE: if log level is not `trace`, this won't have an effect, since the current span is
-        // disabled. In most cases that's fine, since we aren't aware of any control interface
-        // requests including a trace context
-        opentelemetry_nats::attach_span_context(&message);
-        // Skip the topic prefix, the version, and the lattice
-        // e.g. `wasmbus.ctl.v1.{prefix}`
-        let subject = message.subject;
-        let mut parts = subject
-            .trim()
-            .trim_start_matches(&self.ctl_topic_prefix)
-            .trim_start_matches('.')
-            .split('.')
-            .skip(2);
-        trace!(%subject, "handling control interface request");
-
-        // This response is a wrapped Result<Option<Result<Vec<u8>>>> for a good reason.
-        // The outer Result is for reporting protocol errors in handling the request, e.g. failing to
-        //    deserialize the request payload.
-        // The Option is for the case where the request is handled successfully, but the handler
-        //    doesn't want to send a response back to the client, like with an auction.
-        // The inner Result is purely for the success or failure of serializing the [CtlResponse], which
-        //    should never fail but it's a result we must handle.
-        // And finally, the Vec<u8> is the serialized [CtlResponse] that we'll send back to the client
-        let ctl_response = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            // Component commands
-            (Some("component"), Some("auction"), None, None) => self
-                .handle_auction_component(message.payload)
-                .await
-                .map(serialize_ctl_response),
-            (Some("component"), Some("scale"), Some(_host_id), None) => Arc::clone(&self)
-                .handle_scale_component(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("component"), Some("update"), Some(_host_id), None) => Arc::clone(&self)
-                .handle_update_component(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Provider commands
-            (Some("provider"), Some("auction"), None, None) => self
-                .handle_auction_provider(message.payload)
-                .await
-                .map(serialize_ctl_response),
-            (Some("provider"), Some("start"), Some(_host_id), None) => Arc::clone(&self)
-                .handle_start_provider(message.payload)
-                .await
-                .map(serialize_ctl_response),
-            (Some("provider"), Some("stop"), Some(_host_id), None) => self
-                .handle_stop_provider(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Host commands
-            (Some("host"), Some("get"), Some(_host_id), None) => self
-                .handle_inventory()
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("host"), Some("ping"), None, None) => self
-                .handle_ping_hosts()
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("host"), Some("stop"), Some(host_id), None) => self
-                .handle_stop_host(message.payload, host_id)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Claims commands
-            (Some("claims"), Some("get"), None, None) => self
-                .handle_claims()
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Link commands
-            (Some("link"), Some("del"), None, None) => self
-                .handle_link_del(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("link"), Some("get"), None, None) => {
-                // Explicitly returning a Vec<u8> for non-cloning efficiency within handle_links
-                self.handle_links().await.map(|bytes| Some(Ok(bytes)))
-            }
-            (Some("link"), Some("put"), None, None) => self
-                .handle_link_put(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Label commands
-            (Some("label"), Some("del"), Some(host_id), None) => self
-                .handle_label_del(host_id, message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("label"), Some("put"), Some(host_id), None) => self
-                .handle_label_put(host_id, message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Registry commands
-            (Some("registry"), Some("put"), None, None) => self
-                .handle_registries_put(message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Config commands
-            (Some("config"), Some("get"), Some(config_name), None) => self
-                .handle_config_get(config_name)
-                .await
-                .map(|bytes| Some(Ok(bytes))),
-            (Some("config"), Some("put"), Some(config_name), None) => self
-                .handle_config_put(config_name, message.payload)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            (Some("config"), Some("del"), Some(config_name), None) => self
-                .handle_config_delete(config_name)
-                .await
-                .map(Some)
-                .map(serialize_ctl_response),
-            // Topic fallback
-            _ => {
-                warn!(%subject, "received control interface request on unsupported subject");
-                Ok(serialize_ctl_response(Some(CtlResponse::error(
-                    "unsupported subject",
-                ))))
-            }
-        };
-
-        if let Err(err) = &ctl_response {
-            error!(%subject, ?err, "failed to handle control interface request");
-        } else {
-            trace!(%subject, "handled control interface request");
-        }
-
-        if let Some(reply) = message.reply {
-            let headers = injector_to_headers(&TraceContextInjector::default_with_span());
-
-            let payload: Option<Bytes> = match ctl_response {
-                Ok(Some(Ok(payload))) => Some(payload.into()),
-                // No response from the host (e.g. auctioning provider)
-                Ok(None) => None,
-                Err(e) => Some(
-                    serde_json::to_vec(&CtlResponse::error(&e.to_string()))
-                        .context("failed to encode control interface response")
-                        // This should never fail to serialize, but the fallback ensures that we send
-                        // something back to the client even if we somehow fail.
-                        .unwrap_or_else(|_| format!(r#"{{"success":false,"error":"{e}"}}"#).into())
-                        .into(),
-                ),
-                // This would only occur if we failed to serialize a valid CtlResponse. This is
-                // programmer error.
-                Ok(Some(Err(e))) => Some(
-                    serde_json::to_vec(&CtlResponse::error(&e.to_string()))
-                        .context("failed to encode control interface response")
-                        .unwrap_or_else(|_| format!(r#"{{"success":false,"error":"{e}"}}"#).into())
-                        .into(),
-                ),
-            };
-
-            if let Some(payload) = payload {
-                let max_payload = self.ctl_nats.server_info().max_payload;
-                if payload.len() > max_payload {
-                    warn!(
-                        size = payload.len(),
-                        max_size = max_payload,
-                        "ctl response payload is too large to publish and may fail",
-                    );
-                }
-                if let Err(err) = self
-                    .ctl_nats
-                    .publish_with_headers(reply.clone(), headers, payload)
-                    .err_into::<anyhow::Error>()
-                    .and_then(|()| self.ctl_nats.flush().err_into::<anyhow::Error>())
-                    .await
-                {
-                    error!(%subject, ?err, "failed to publish reply to control interface request");
-                }
-            }
-        }
-    }
-
     // TODO: Remove this before wasmCloud 1.2 is released. This is a backwards-compatible
     // provider link definition put that is published to the provider's id, which is what
     // providers built for wasmCloud 1.0 expected.
@@ -2667,7 +2393,7 @@ fn human_friendly_uptime(uptime: Duration) -> String {
     .to_string()
 }
 
-fn injector_to_headers(injector: &TraceContextInjector) -> async_nats::header::HeaderMap {
+pub fn injector_to_headers(injector: &TraceContextInjector) -> async_nats::header::HeaderMap {
     injector
         .iter()
         .filter_map(|(k, v)| {

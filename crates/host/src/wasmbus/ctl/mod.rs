@@ -27,6 +27,8 @@ use crate::wasmbus::{
 };
 use crate::ResourceRef;
 
+pub mod nats;
+
 /// Implementation for the server-side handling of control interface requests.
 ///
 /// This trait is not a part of the `wasmcloud_control_interface` crate yet to allow
@@ -232,7 +234,6 @@ impl ControlInterfaceServer for Host {
 
         self.heartbeat.abort();
         self.data_watch.abort();
-        self.queue.abort();
         self.policy_manager.policy_changes.abort();
         let deadline =
             timeout.and_then(|timeout| Instant::now().checked_add(Duration::from_millis(timeout)));
