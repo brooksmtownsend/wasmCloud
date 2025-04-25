@@ -18,10 +18,9 @@ use wasmcloud_core::logging::Level as WasmcloudLogLevel;
 use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
-use wasmcloud_host::wasmbus::host_config::PolicyService as PolicyServiceConfig;
-use wasmcloud_host::wasmbus::Features;
+use wasmcloud_host::wasmbus::{connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
-use wasmcloud_host::WasmbusHostConfig;
+use wasmcloud_host::{NatsPolicyManager, PolicyHostInfo, PolicyManager, WasmbusHostConfig};
 use wasmcloud_tracing::configure_observability;
 
 #[derive(Debug, Parser)]
@@ -472,17 +471,7 @@ async fn main() -> anyhow::Result<()> {
         oci_user: args.oci_user,
         oci_password: args.oci_password,
     };
-    if let Some(policy_topic) = args.policy_topic.as_deref() {
-        anyhow::ensure!(
-            validate_nats_subject(policy_topic).is_ok(),
-            "Invalid policy topic"
-        );
-    }
-    let policy_service_config = PolicyServiceConfig {
-        policy_topic: args.policy_topic,
-        policy_changes_topic: args.policy_changes_topic,
-        policy_timeout_ms: args.policy_timeout_ms,
-    };
+
     let mut labels = args
         .label
         .unwrap_or_default()
@@ -519,6 +508,37 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let ctl_nats = connect_nats(
+        ctl_nats_url.as_str(),
+        ctl_jwt.or_else(|| nats_jwt.clone()).as_ref(),
+        ctl_key.or_else(|| nats_key.clone()),
+        args.ctl_tls,
+        None,
+        workload_identity_config,
+    )
+    .await
+    .context("failed to establish NATS control connection")?;
+
+    if let Some(policy_topic) = args.policy_topic.as_deref() {
+        anyhow::ensure!(
+            validate_nats_subject(policy_topic).is_ok(),
+            "Invalid policy topic"
+        );
+    }
+    let policy_manager: Arc<dyn PolicyManager> = Arc::new(
+        NatsPolicyManager::new(
+            ctl_nats.clone(),
+            PolicyHostInfo {
+                public_key: host_key.clone().unwrap().public_key(),
+                lattice: args.lattice.to_string(),
+                labels: HashMap::from_iter(labels.clone()),
+            },
+            args.policy_topic,
+            args.policy_timeout_ms,
+            args.policy_changes_topic,
+        )
+        .await?,
+    );
     let (host, shutdown) = Box::pin(
         wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
             lattice: Arc::from(args.lattice.clone()),
@@ -537,7 +557,6 @@ async fn main() -> anyhow::Result<()> {
             log_level,
             enable_structured_logging: args.enable_structured_logging,
             otel_config,
-            policy_service_config,
             secrets_topic_prefix: args.secrets_topic_prefix,
             version: env!("CARGO_PKG_VERSION").to_string(),
             max_execution_time: args.max_execution_time,
@@ -552,17 +571,8 @@ async fn main() -> anyhow::Result<()> {
             enable_component_auction: args.enable_component_auction.unwrap_or(true),
             enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
         })
-        .with_control_nats(
-            ctl_nats_url.clone(),
-            ctl_jwt.clone().or_else(|| nats_jwt.clone()),
-            ctl_key.clone().or_else(|| nats_key.clone()),
-            args.ctl_tls,
-            // TODO(brooksmtownsend): configurable request timeout?
-            None,
-            Some(args.ctl_topic_prefix.clone()),
-            workload_identity_config.clone(),
-        )
-        .await?
+        .with_policy_manager(policy_manager)
+        .with_control_nats(ctl_nats, Some(args.ctl_topic_prefix.clone()))
         .build(),
     )
     .await

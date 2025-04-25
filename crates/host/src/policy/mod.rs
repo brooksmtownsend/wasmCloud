@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wascap::jwt;
 
+mod default;
+pub use default::DefaultPolicyManager;
+
 /// Pluggable NATS implementation of the policy manager
 pub mod nats;
 
@@ -269,14 +272,3 @@ pub trait PolicyManager: Send + Sync {
         })
     }
 }
-
-/// A default policy manager that always returns true for all requests
-/// This is used when no policy manager is configured
-pub struct DefaultPolicyManager;
-impl DefaultPolicyManager {
-    /// Create a new default policy manager
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-impl PolicyManager for DefaultPolicyManager {}

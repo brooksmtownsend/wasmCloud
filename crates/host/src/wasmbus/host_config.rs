@@ -51,8 +51,6 @@ pub struct Host {
     pub config_service_enabled: bool,
     /// configuration for OpenTelemetry tracing
     pub otel_config: OtelConfig,
-    /// configuration for wasmCloud policy service
-    pub policy_service_config: PolicyService,
     /// topic for wasmCloud secrets backend
     pub secrets_topic_prefix: Option<String>,
     /// The semver version of the host. This is used by a consumer of this crate to indicate the
@@ -111,7 +109,6 @@ impl Default for Host {
             log_level: LogLevel::Info,
             config_service_enabled: false,
             otel_config: OtelConfig::default(),
-            policy_service_config: PolicyService::default(),
             secrets_topic_prefix: None,
             version: env!("CARGO_PKG_VERSION").to_string(),
             max_execution_time: Duration::from_millis(10 * 60 * 1000),
