@@ -108,7 +108,9 @@ impl super::Host {
         let subject = message.subject;
         let mut parts = subject
             .trim()
-            .trim_start_matches(&self.ctl_topic_prefix)
+            // TODO(brooksmtownsend): topic prefix parsing elsewhere
+            // .trim_start_matches(&self.ctl_topic_prefix)
+            .trim_start_matches("wasmbus.ctl")
             .trim_start_matches('.')
             .split('.')
             .skip(2);

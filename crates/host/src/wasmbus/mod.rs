@@ -39,6 +39,7 @@ use tokio::time::{interval_at, Instant};
 use tokio_stream::wrappers::IntervalStream;
 use tracing::{debug, debug_span, error, info, instrument, trace, warn, Instrument as _};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use url::Url;
 use wascap::jwt;
 use wasmcloud_control_interface::{
     ComponentAuctionAck, ComponentAuctionRequest, ComponentDescription, CtlResponse,
@@ -47,7 +48,7 @@ use wasmcloud_control_interface::{
     ScaleComponentCommand, StartProviderCommand, StopHostCommand, StopProviderCommand,
     UpdateComponentCommand,
 };
-use wasmcloud_core::{secrets, ComponentId};
+use wasmcloud_core::ComponentId;
 use wasmcloud_runtime::capability::secrets::store::SecretValue;
 use wasmcloud_runtime::component::WrpcServeEvent;
 use wasmcloud_runtime::Runtime;
@@ -55,12 +56,13 @@ use wasmcloud_secrets_types::SECRET_PREFIX;
 use wasmcloud_tracing::context::TraceContextInjector;
 use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 
+use crate::policy::DefaultPolicyManager;
 use crate::registry::RegistryCredentialExt;
 use crate::wasmbus::jetstream::create_bucket;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
-    fetch_component, HostMetrics, OciConfig, PolicyHostInfo, PolicyManager, PolicyResponse,
-    RegistryAuth, RegistryConfig, RegistryType, ResourceRef, SecretsManager,
+    fetch_component, HostMetrics, NatsPolicyManager, OciConfig, PolicyHostInfo, PolicyManager,
+    PolicyResponse, RegistryAuth, RegistryConfig, RegistryType, ResourceRef, SecretsManager,
 };
 
 mod claims;
@@ -159,7 +161,7 @@ struct WrpcServer {
     id: Arc<str>,
     image_reference: Arc<str>,
     annotations: Arc<Annotations>,
-    policy_manager: Arc<PolicyManager>,
+    policy_manager: Arc<Box<dyn PolicyManager>>,
     metrics: Arc<HostMetrics>,
 }
 
@@ -236,25 +238,25 @@ impl wrpc_transport::Serve for WrpcServer {
                     span.set_parent(wasmcloud_tracing::context::get_span_context(&trace_context));
                 }
 
-                let PolicyResponse {
-                    request_id,
-                    permitted,
-                    message,
-                } = policy_manager
-                    .evaluate_perform_invocation(
-                        &id,
-                        &image_reference,
-                        &annotations,
-                        claims.as_deref(),
-                        instance.to_string(),
-                        func.to_string(),
-                    )
-                    .instrument(debug_span!(parent: &span, "policy_check"))
-                    .await?;
-                ensure!(
-                    permitted,
-                    "policy denied request to invoke component `{request_id}`: `{message:?}`",
-                );
+                    let PolicyResponse {
+                        request_id,
+                        permitted,
+                        message,
+                    } = policy_manager
+                        .evaluate_perform_invocation(
+                            &id,
+                            &image_reference,
+                            &annotations,
+                            claims.as_deref(),
+                            instance.to_string(),
+                            func.to_string(),
+                        )
+                        .instrument(debug_span!(parent: &span, "policy_check"))
+                        .await?;
+                    ensure!(
+                        permitted,
+                        "policy denied request to invoke component `{request_id}`: `{message:?}`",
+                    );
 
                 Ok((
                     InvocationContext{
@@ -307,24 +309,24 @@ pub struct Host {
     providers: RwLock<HashMap<String, Provider>>,
     provider_claims: Arc<RwLock<HashMap<String, jwt::Claims<jwt::CapabilityProvider>>>>,
     runtime: Runtime,
+    // Optional overrides for registry configuration
+    registry_config: RwLock<HashMap<String, RegistryConfig>>,
 
     // TODO: events as trait
-    // Extension points
-    policy_manager: Arc<PolicyManager>,
-    secrets_manager: Arc<SecretsManager>,
-    /// The provider map is a map of provider component ID to provider
-    registry_config: RwLock<HashMap<String, RegistryConfig>>,
     // Traits
     event_builder: EventBuilderV10,
 
-    ctl_topic_prefix: String,
     /// NATS client to use for RPC calls
     rpc_nats: Arc<async_nats::Client>,
-    data: Store,
     /// Task to watch for changes in the LATTICEDATA store
     data_watch: AbortHandle,
+
+    // NATS extension points
     config_data: Store,
     config_generator: BundleGenerator,
+    data: Store,
+    policy_manager: Arc<Box<dyn PolicyManager>>,
+    secrets_manager: Arc<SecretsManager>,
 
     // OTEL
     metrics: Arc<HostMetrics>,
@@ -564,6 +566,7 @@ async fn merge_registry_config(
 #[derive(Default)]
 pub struct HostBuilder {
     config: HostConfig,
+    ctl_nats: Option<async_nats::Client>,
 }
 
 impl HostBuilder {
@@ -606,12 +609,42 @@ impl HostBuilder {
         HostBuilder::default()
     }
 
-    /// Construct a new [HostBuilder] instance with the given configuration
-    #[instrument(level = "debug", skip_all)]
-    pub fn from_config(config: HostConfig) -> Self {
-        HostBuilder { config }
+    /// Initialize the host with the NATS control interface connection
+    ///
+    /// NATS URL to connect to for control interface connection
+    /// Authentication JWT for control interface connection, must be specified with `ctl_key`
+    /// Authentication key pair for control interface connection, must be specified with `ctl_jwt`
+    /// Whether to require TLS for control interface connection
+    /// The topic prefix to use for control interface subscriptions, defaults to `wasmbus.ctl`
+    pub async fn with_control_nats(
+        self,
+        ctl_nats_url: Url,
+        ctl_jwt: Option<String>,
+        ctl_key: Option<Arc<KeyPair>>,
+        ctl_tls: bool,
+        ctl_request_timeout: Option<Duration>,
+        ctl_topic_prefix: String,
+        workload_identity_config: Option<WorkloadIdentityConfig>,
+    ) -> anyhow::Result<Self> {
+        let ctl_nats = connect_nats(
+            ctl_nats_url.as_str(),
+            ctl_jwt.as_ref(),
+            ctl_key.clone(),
+            ctl_tls,
+            ctl_request_timeout,
+            workload_identity_config,
+        )
+        .await
+        .context("failed to establish NATS control connection")?;
+
+        Ok(HostBuilder {
+            ctl_nats: Some(ctl_nats),
+            ..self
+        })
     }
 
+    /// Build a new [Host] instance with the given configuration
+    #[instrument(level = "debug", skip_all)]
     pub async fn build(
         self,
     ) -> anyhow::Result<(Arc<Host>, impl Future<Output = anyhow::Result<()>>)> {
@@ -680,70 +713,6 @@ impl HostBuilder {
             .context("failed to build runtime")?;
         let event_builder = EventBuilderV10::new().source(host_key.public_key());
 
-        let ctl_nats = connect_nats(
-            self.config.ctl_nats_url.as_str(),
-            self.config.ctl_jwt.as_ref(),
-            self.config.ctl_key.clone(),
-            self.config.ctl_tls,
-            None,
-            workload_identity_config,
-        )
-        .await
-        .context("failed to establish NATS control connection")?;
-        let ctl_jetstream = if let Some(domain) = self.config.js_domain.as_ref() {
-            async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
-        } else {
-            async_nats::jetstream::new(ctl_nats.clone())
-        };
-        let bucket = format!("LATTICEDATA_{}", self.config.lattice);
-        let data = create_bucket(&ctl_jetstream, &bucket).await?;
-
-        let config_bucket = format!("CONFIGDATA_{}", self.config.lattice);
-        let config_data = create_bucket(&ctl_jetstream, &config_bucket).await?;
-
-        let supplemental_config = if self.config.config_service_enabled {
-            load_supplemental_config(&ctl_nats, &self.config.lattice, &labels).await?
-        } else {
-            SupplementalConfig::default()
-        };
-
-        let registry_config = RwLock::new(supplemental_config.registry_config.unwrap_or_default());
-        merge_registry_config(&registry_config, self.config.oci_opts.clone()).await;
-
-        let policy_manager = PolicyManager::new(
-            ctl_nats.clone(),
-            PolicyHostInfo {
-                public_key: host_key.public_key(),
-                lattice: self.config.lattice.to_string(),
-                labels: HashMap::from_iter(labels.clone()),
-            },
-            self.config.policy_service_config.policy_topic.clone(),
-            self.config.policy_service_config.policy_timeout_ms,
-            self.config
-                .policy_service_config
-                .policy_changes_topic
-                .clone(),
-        )
-        .await?;
-
-        // If provided, secrets topic must be non-empty
-        // TODO(#2411): Validate secrets topic prefix as a valid NATS subject
-        ensure!(
-            self.config.secrets_topic_prefix.is_none()
-                || self
-                    .config
-                    .secrets_topic_prefix
-                    .as_ref()
-                    .is_some_and(|topic| !topic.is_empty()),
-            "secrets topic prefix must be non-empty"
-        );
-
-        let secrets_manager = Arc::new(SecretsManager::new(
-            &config_data,
-            self.config.secrets_topic_prefix.as_ref(),
-            &ctl_nats,
-        ));
-
         let scope = InstrumentationScope::builder("wasmcloud-host")
             .with_version(self.config.version.clone())
             .with_attributes(vec![
@@ -769,8 +738,6 @@ impl HostBuilder {
             None,
         )
         .context("failed to create HostMetrics instance")?;
-
-        let config_generator = BundleGenerator::new(config_data.clone());
 
         debug!("Feature flags: {:?}", self.config.experimental_features);
         let mut tasks = JoinSet::new();
@@ -851,26 +818,90 @@ impl HostBuilder {
         let (data_watch_abort, data_watch_abort_reg) = AbortHandle::new_pair();
         let start_at = Instant::now();
 
+        let (data, config_data, config_generator, policy_manager, secrets_manager, registry_config) =
+            if let Some(ctl_nats) = self.ctl_nats {
+                let ctl_jetstream = if let Some(domain) = self.config.js_domain.as_ref() {
+                    async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
+                } else {
+                    async_nats::jetstream::new(ctl_nats.clone())
+                };
+                let bucket = format!("LATTICEDATA_{}", self.config.lattice);
+                let data = create_bucket(&ctl_jetstream, &bucket).await?;
+
+                let config_bucket = format!("CONFIGDATA_{}", self.config.lattice);
+                let config_data = create_bucket(&ctl_jetstream, &config_bucket).await?;
+
+                let supplemental_config = if self.config.config_service_enabled {
+                    load_supplemental_config(&ctl_nats, &self.config.lattice, &labels).await?
+                } else {
+                    SupplementalConfig::default()
+                };
+
+                let registry_config =
+                    RwLock::new(supplemental_config.registry_config.unwrap_or_default());
+                merge_registry_config(&registry_config, self.config.oci_opts.clone()).await;
+
+                let policy_manager: Arc<Box<dyn PolicyManager>> = Arc::new(Box::new(
+                    NatsPolicyManager::new(
+                        ctl_nats.clone(),
+                        PolicyHostInfo {
+                            public_key: host_key.public_key(),
+                            lattice: self.config.lattice.to_string(),
+                            labels: HashMap::from_iter(labels.clone()),
+                        },
+                        self.config.policy_service_config.policy_topic.clone(),
+                        self.config.policy_service_config.policy_timeout_ms,
+                        self.config
+                            .policy_service_config
+                            .policy_changes_topic
+                            .clone(),
+                    )
+                    .await?,
+                ));
+
+                // If provided, secrets topic must be non-empty
+                // TODO(#2411): Validate secrets topic prefix as a valid NATS subject
+                ensure!(
+                    self.config.secrets_topic_prefix.is_none()
+                        || self
+                            .config
+                            .secrets_topic_prefix
+                            .as_ref()
+                            .is_some_and(|topic| !topic.is_empty()),
+                    "secrets topic prefix must be non-empty"
+                );
+
+                let secrets_manager = Arc::new(SecretsManager::new(
+                    &config_data,
+                    self.config.secrets_topic_prefix.as_ref(),
+                    &ctl_nats,
+                ));
+
+                let config_generator = BundleGenerator::new(config_data.clone());
+                (
+                    Some(data),
+                    Some(config_data),
+                    Some(config_generator),
+                    Some(policy_manager),
+                    Some(secrets_manager),
+                    Some(registry_config),
+                )
+            } else {
+                (None, None, None, None, None, None)
+            };
+
         let host = Host {
             components: Arc::new(RwLock::new(HashMap::new())),
+            providers: RwLock::new(HashMap::new()),
             event_builder,
             friendly_name,
             heartbeat: heartbeat_abort.clone(),
-            ctl_topic_prefix: self.config.ctl_topic_prefix.clone(),
             host_key,
             host_token,
             secrets_xkey: Arc::new(XKey::new()),
             labels: Arc::new(RwLock::new(labels)),
-            rpc_nats: Arc::new(rpc_nats),
             experimental_features: self.config.experimental_features,
-            data,
             data_watch: data_watch_abort.clone(),
-            config_data,
-            config_generator,
-            policy_manager,
-            secrets_manager,
-            providers: RwLock::new(HashMap::new()),
-            registry_config,
             runtime,
             start_at,
             stop_rx,
@@ -884,18 +915,49 @@ impl HostBuilder {
             messaging_links: Arc::default(),
             ready: Arc::clone(&ready),
             tasks,
+            rpc_nats: Arc::new(rpc_nats),
+            // NATS extension points which we have default implementations for
+            registry_config: registry_config.unwrap_or_default(),
+            policy_manager: policy_manager
+                .unwrap_or_else(|| Arc::new(Box::new(DefaultPolicyManager::new()))),
+            // NATS extension points which we assume exist
+            data: data.unwrap(),
+            config_data: config_data.unwrap(),
+            config_generator: config_generator.unwrap(),
+            secrets_manager: secrets_manager.unwrap(),
         };
 
         let host = Arc::new(host);
 
         let data_watch: JoinHandle<anyhow::Result<_>> = spawn({
-            let data = host.data.clone();
             let host = Arc::clone(&host);
+            let data = host.data.clone();
             async move {
+                // Setup data watch first
                 let data_watch = data
                     .watch_all()
                     .await
                     .context("failed to watch lattice data bucket")?;
+
+                // Process existing data without emitting events
+                data.keys()
+                    .await
+                    .context("failed to read keys of lattice data bucket")?
+                    .map_err(|e| anyhow!(e).context("failed to read lattice data stream"))
+                    .try_filter_map(|key| async {
+                        data.entry(key)
+                            .await
+                            .context("failed to get entry in lattice data bucket")
+                    })
+                    .for_each(|entry| async {
+                        match entry {
+                            Ok(entry) => host.process_entry(entry).await,
+                            Err(err) => {
+                                error!(%err, "failed to read entry from lattice data bucket")
+                            }
+                        }
+                    })
+                    .await;
                 let mut data_watch = Abortable::new(data_watch, data_watch_abort_reg);
                 data_watch
                     .by_ref()
@@ -971,26 +1033,6 @@ impl HostBuilder {
             }
         });
 
-        // Process existing data without emitting events
-        host.data
-            .keys()
-            .await
-            .context("failed to read keys of lattice data bucket")?
-            .map_err(|e| anyhow!(e).context("failed to read lattice data stream"))
-            .try_filter_map(|key| async {
-                host.data
-                    .entry(key)
-                    .await
-                    .context("failed to get entry in lattice data bucket")
-            })
-            .for_each(|entry| async {
-                match entry {
-                    Ok(entry) => host.process_entry(entry).await,
-                    Err(err) => error!(%err, "failed to read entry from lattice data bucket"),
-                }
-            })
-            .await;
-
         let start_evt = json!({
             "friendly_name": host.friendly_name,
             "labels": *host.labels.read().await,
@@ -1009,7 +1051,6 @@ impl HostBuilder {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
             data_watch_abort.abort();
-            host.policy_manager.policy_changes.abort();
             let _ = try_join!(data_watch, heartbeat).context("failed to await tasks")?;
             host.publish_event(
                 "host_stopped",
@@ -1028,6 +1069,15 @@ impl HostBuilder {
                 .context("failed to flush NATS clients")?;
             Ok(())
         }))
+    }
+}
+
+impl From<HostConfig> for HostBuilder {
+    fn from(config: HostConfig) -> Self {
+        HostBuilder {
+            config,
+            ..Default::default()
+        }
     }
 }
 
@@ -1213,7 +1263,7 @@ impl Host {
                     id: Arc::clone(&id),
                     image_reference: Arc::clone(&image_reference),
                     annotations: Arc::new(annotations.clone()),
-                    policy_manager: Arc::clone(&self.policy_manager),
+                    policy_manager: self.policy_manager.clone(),
                     metrics: Arc::clone(&self.metrics),
                 },
                 handler.clone(),

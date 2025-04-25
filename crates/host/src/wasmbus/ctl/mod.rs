@@ -234,7 +234,6 @@ impl ControlInterfaceServer for Host {
 
         self.heartbeat.abort();
         self.data_watch.abort();
-        self.policy_manager.policy_changes.abort();
         let deadline =
             timeout.and_then(|timeout| Instant::now().checked_add(Duration::from_millis(timeout)));
         self.stop_tx.send_replace(deadline);
@@ -987,7 +986,8 @@ impl ControlInterfaceServer for Host {
             .uptime_seconds(uptime.as_secs())
             .uptime_human(human_friendly_uptime(uptime))
             .version(self.host_config.version.clone())
-            .ctl_host(self.host_config.ctl_nats_url.to_string())
+            // TODO(brooksmtownsend): how get this value? Why does it matter?
+            // .ctl_host(self.host_config.ctl_nats_url.to_string())
             .rpc_host(self.host_config.rpc_nats_url.to_string())
             .lattice(self.host_config.lattice.to_string());
 

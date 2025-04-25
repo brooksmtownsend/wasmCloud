@@ -19,16 +19,6 @@ use crate::wasmbus::experimental::Features;
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct Host {
-    /// NATS URL to connect to for control interface connection
-    pub ctl_nats_url: Url,
-    /// Authentication JWT for control interface connection, must be specified with `ctl_key`
-    pub ctl_jwt: Option<String>,
-    /// Authentication key pair for control interface connection, must be specified with `ctl_jwt`
-    pub ctl_key: Option<Arc<KeyPair>>,
-    /// Whether to require TLS for control interface connection
-    pub ctl_tls: bool,
-    /// The topic prefix to use for control interface subscriptions, defaults to `wasmbus.ctl`
-    pub ctl_topic_prefix: String,
     /// NATS URL to connect to for component RPC
     pub rpc_nats_url: Url,
     /// Timeout period for all RPC calls
@@ -104,12 +94,6 @@ pub struct PolicyService {
 impl Default for Host {
     fn default() -> Self {
         Self {
-            ctl_nats_url: Url::parse("nats://localhost:4222")
-                .expect("failed to parse control NATS URL"),
-            ctl_jwt: None,
-            ctl_key: None,
-            ctl_tls: false,
-            ctl_topic_prefix: "wasmbus.ctl".to_string(),
             rpc_nats_url: Url::parse("nats://localhost:4222")
                 .expect("failed to parse RPC NATS URL"),
             rpc_timeout: Duration::from_millis(2000),

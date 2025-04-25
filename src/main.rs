@@ -515,9 +515,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let experimental_features = args.experimental_features.into_iter().sum();
-    let (host, shutdown) = Box::pin(wasmcloud_host::wasmbus::HostBuilder::from_config(WasmbusHostConfig {
-        ctl_nats_url: ctl_nats_url.clone(),
+    let experimental_features: Features = args.experimental_features.into_iter().sum();
+    let workload_identity_config = if experimental_features.workload_identity_auth_enabled() {
+        Some(WorkloadIdentityConfig::from_env()?)
+    } else {
+        None
+    };
+    let (host, shutdown) = Box::pin(wasmcloud_host::wasmbus::HostBuilder::from(WasmbusHostConfig {
         lattice: Arc::from(args.lattice.clone()),
         host_key: host_key.clone(),
         config_service_enabled: args.config_service_enabled,
@@ -525,10 +529,6 @@ async fn main() -> anyhow::Result<()> {
         labels,
         provider_shutdown_delay: Some(args.provider_shutdown_delay),
         oci_opts,
-        ctl_jwt: ctl_jwt.clone().or_else(|| nats_jwt.clone()),
-        ctl_key: ctl_key.clone().or_else(|| nats_key.clone()),
-        ctl_tls: args.ctl_tls,
-        ctl_topic_prefix: args.ctl_topic_prefix.clone(),
         rpc_nats_url,
         rpc_timeout: args.rpc_timeout_ms,
         rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
@@ -552,16 +552,22 @@ async fn main() -> anyhow::Result<()> {
         http_admin: args.http_admin,
         enable_component_auction: args.enable_component_auction.unwrap_or(true),
         enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
-    }).build())
+    })
+    .with_control_nats(
+        ctl_nats_url.clone(),
+        ctl_jwt.clone().or_else(|| nats_jwt.clone()),
+        ctl_key.clone().or_else(|| nats_key.clone()),
+        args.ctl_tls,
+        // TODO(brooksmtownsend): configurable request timeout?
+        None,
+        args.ctl_topic_prefix.clone(),
+        workload_identity_config.clone())
+        .await?
+    .build())
     .await
     .context("failed to initialize host")?;
 
     let host = Arc::clone(&host);
-    let workload_identity_config = if experimental_features.workload_identity_auth_enabled() {
-        Some(WorkloadIdentityConfig::from_env()?)
-    } else {
-        None
-    };
 
     let ctl_nats = Arc::new(connect_nats(
         ctl_nats_url.as_str(),
