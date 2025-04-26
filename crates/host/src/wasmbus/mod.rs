@@ -22,8 +22,9 @@ use event::{DefaultEventPublisher, EventPublisher};
 use futures::stream::{AbortHandle, Abortable};
 use futures::{join, stream, Stream, StreamExt, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use nats::connect_nats;
 use nkeys::{KeyPair, KeyPairType, XKey};
-use providers::Provider;
+use providers::{Provider, ProviderManager};
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -355,6 +356,9 @@ pub struct Host {
     /// The NATS client used for making RPC calls.
     rpc_nats: Arc<async_nats::Client>,
 
+    /// The manager for communicating with capability providers.
+    provider_manager: Arc<dyn ProviderManager>,
+
     /// Configured OpenTelemetry metrics for monitoring the host.
     metrics: Arc<HostMetrics>,
 
@@ -380,51 +384,6 @@ pub struct Host {
     /// A set of tasks managed by the host.
     #[allow(unused)]
     tasks: JoinSet<()>,
-}
-
-/// Given the NATS address, authentication jwt, seed, tls requirement and optional request timeout,
-/// attempt to establish connection.
-///
-/// This function should be used to create a NATS client for Host communication, for non-host NATS
-/// clients we recommend using async-nats directly.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Only one of JWT or seed is specified, as we cannot authenticate with only one of them
-/// - Connection fails
-pub async fn connect_nats(
-    addr: impl async_nats::ToServerAddrs,
-    jwt: Option<&String>,
-    key: Option<Arc<KeyPair>>,
-    require_tls: bool,
-    request_timeout: Option<Duration>,
-    workload_identity_config: Option<WorkloadIdentityConfig>,
-) -> anyhow::Result<async_nats::Client> {
-    let opts = match (jwt, key, workload_identity_config) {
-        (Some(jwt), Some(key), None) => {
-            async_nats::ConnectOptions::with_jwt(jwt.to_string(), move |nonce| {
-                let key = key.clone();
-                async move { key.sign(&nonce).map_err(async_nats::AuthError::new) }
-            })
-        }
-        (Some(_), None, _) | (None, Some(_), _) => {
-            bail!("cannot authenticate if only one of jwt or seed is specified")
-        }
-        (jwt, key, Some(wid_cfg)) => {
-            setup_workload_identity_nats_connect_options(jwt, key, wid_cfg).await?
-        }
-        _ => async_nats::ConnectOptions::new(),
-    };
-    let opts = if let Some(timeout) = request_timeout {
-        opts.request_timeout(Some(timeout))
-    } else {
-        opts
-    };
-    let opts = opts.require_tls(require_tls);
-    opts.connect(addr)
-        .await
-        .context("failed to connect to NATS")
 }
 
 #[cfg(unix)]
@@ -630,6 +589,8 @@ pub struct HostBuilder {
     policy_manager: Option<Arc<dyn PolicyManager>>,
     /// The secrets manager to use for managing secrets
     secrets_manager: Option<Arc<dyn SecretsManager>>,
+    /// The provider manager to use for managing providers
+    provider_manager: Option<Arc<dyn ProviderManager>>,
 }
 
 impl HostBuilder {
@@ -725,17 +686,20 @@ impl HostBuilder {
         }
     }
 
+    /// Initialize the host with the given provider manager for managing providers
+    pub fn with_provider_manager(self, provider_manager: Option<Arc<dyn ProviderManager>>) -> Self {
+        Self {
+            provider_manager,
+            ..self
+        }
+    }
+
     /// Build a new [Host] instance with the given configuration
     #[instrument(level = "debug", skip_all)]
     pub async fn build(
         self,
     ) -> anyhow::Result<(Arc<Host>, impl Future<Output = anyhow::Result<()>>)> {
-        let host_key = if let Some(host_key) = &self.config.host_key {
-            ensure!(host_key.key_pair_type() == KeyPairType::Server);
-            Arc::clone(host_key)
-        } else {
-            Arc::new(KeyPair::new(KeyPairType::Server))
-        };
+        ensure!(self.config.host_key.key_pair_type() == KeyPairType::Server);
 
         let mut labels = BTreeMap::from([
             ("hostcore.arch".into(), ARCH.into()),
@@ -750,7 +714,7 @@ impl HostBuilder {
         let claims = jwt::Claims::<jwt::Host>::new(
             friendly_name.clone(),
             host_issuer.public_key(),
-            host_key.public_key().clone(),
+            self.config.host_key.public_key().clone(),
             Some(HashMap::from_iter([(
                 "self_signed".to_string(),
                 "true".to_string(),
@@ -797,7 +761,7 @@ impl HostBuilder {
         let scope = InstrumentationScope::builder("wasmcloud-host")
             .with_version(self.config.version.clone())
             .with_attributes(vec![
-                KeyValue::new("host.id", host_key.public_key()),
+                KeyValue::new("host.id", self.config.host_key.public_key()),
                 KeyValue::new("host.version", self.config.version.clone()),
                 KeyValue::new("host.arch", ARCH),
                 KeyValue::new("host.os", OS),
@@ -814,7 +778,7 @@ impl HostBuilder {
         let meter = global::meter_with_scope(scope);
         let metrics = HostMetrics::new(
             &meter,
-            host_key.public_key(),
+            self.config.host_key.public_key(),
             self.config.lattice.to_string(),
             None,
         )
@@ -903,7 +867,7 @@ impl HostBuilder {
             providers: RwLock::new(HashMap::new()),
             friendly_name,
             heartbeat: heartbeat_abort.clone(),
-            host_key,
+            host_key: self.config.host_key.clone(),
             host_token,
             secrets_xkey: Arc::new(XKey::new()),
             labels: Arc::new(RwLock::new(labels)),
@@ -917,23 +881,23 @@ impl HostBuilder {
             provider_claims: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics),
             max_execution_time: self.config.max_execution_time,
+            // TODO(brooksmtownsend): Why store entire config if we only need certain fields?
             host_config: self.config,
             messaging_links: Arc::default(),
             ready: Arc::clone(&ready),
             tasks,
             rpc_nats: Arc::new(rpc_nats),
+            registry_config: RwLock::new(self.registry_config),
             // Extension traits that we fallback to defaults for
             event_publisher: self
                 .event_publisher
                 .unwrap_or_else(|| Arc::new(DefaultEventPublisher::new())),
-            registry_config: RwLock::new(self.registry_config),
             policy_manager: self
                 .policy_manager
                 .unwrap_or_else(|| Arc::new(DefaultPolicyManager::new())),
             secrets_manager: self
                 .secrets_manager
                 .unwrap_or_else(|| Arc::new(DefaultSecretsManager::new())),
-            // NATS extension points which we assume exist
             data_store: self
                 .data_store
                 .unwrap_or_else(|| Arc::new(DefaultStore::new())),
@@ -944,6 +908,8 @@ impl HostBuilder {
             config_generator: self
                 .bundle_generator
                 .unwrap_or_else(|| BundleGenerator::new(Arc::new(DefaultStore::new()))),
+            // TODO(brooksmtownsend): what's the default? Only builtins?
+            provider_manager: self.provider_manager.unwrap(), // .unwrap_or_else(|| Arc::new(DefaultProviderManager::new())),
         };
 
         let host = Arc::new(host);
@@ -1198,6 +1164,7 @@ impl Host {
                 .clamp(MIN_INVOCATION_CHANNEL_SIZE, MAX_INVOCATION_CHANNEL_SIZE),
         );
         let prefix = Arc::from(format!("{}.{id}", &self.host_config.lattice));
+        // TODO(brooksmtownsend): fetch wrpc client from RPC service
         let nats = wrpc_transport_nats::Client::new(
             Arc::clone(&self.rpc_nats),
             Arc::clone(&prefix),
@@ -2089,17 +2056,19 @@ impl Host {
             .resolve_link_config(link.clone(), None, None, &XKey::new())
             .await
             .context("failed to resolve link config")?;
-        let lattice = &self.host_config.lattice;
-        let payload: Bytes = serde_json::to_vec(&provider_link)
-            .context("failed to serialize provider link definition")?
-            .into();
+        // let lattice = &self.host_config.lattice;
+        // let payload: Bytes = serde_json::to_vec(&provider_link)
+        //     .context("failed to serialize provider link definition")?
+        //     .into();
 
         if let Err(e) = self
-            .rpc_nats
-            .publish_with_headers(
-                format!("wasmbus.rpc.{lattice}.{}.linkdefs.put", link.source_id()),
-                injector_to_headers(&TraceContextInjector::default_with_span()),
-                payload.clone(),
+            .provider_manager
+            .put_link(
+                &provider_link,
+                link.source_id(),
+                // format!("wasmbus.rpc.{lattice}.{}.linkdefs.put", link.source_id()),
+                // injector_to_headers(&TraceContextInjector::default_with_span()),
+                // payload.clone(),
             )
             .await
         {
@@ -2110,12 +2079,8 @@ impl Host {
         }
 
         if let Err(e) = self
-            .rpc_nats
-            .publish_with_headers(
-                format!("wasmbus.rpc.{lattice}.{}.linkdefs.put", link.target()),
-                injector_to_headers(&TraceContextInjector::default_with_span()),
-                payload,
-            )
+            .provider_manager
+            .put_link(&provider_link, link.target())
             .await
         {
             warn!(
@@ -2139,20 +2104,9 @@ impl Host {
             )
             .await
             .context("failed to resolve link config and secrets")?;
-        let lattice = &self.host_config.lattice;
-        let payload: Bytes = serde_json::to_vec(&provider_link)
-            .context("failed to serialize provider link definition")?
-            .into();
 
-        self.rpc_nats
-            .publish_with_headers(
-                format!(
-                    "wasmbus.rpc.{lattice}.{}.linkdefs.put",
-                    provider.xkey.public_key()
-                ),
-                injector_to_headers(&TraceContextInjector::default_with_span()),
-                payload.clone(),
-            )
+        self.provider_manager
+            .put_link(&provider_link, &provider.xkey.public_key())
             .await
             .context("failed to publish provider link definition put")
     }
@@ -2163,7 +2117,6 @@ impl Host {
     /// is linked to a provider (which it should never be.)
     #[instrument(level = "debug", skip(self))]
     async fn del_provider_link(&self, link: &Link) -> anyhow::Result<()> {
-        let lattice = &self.host_config.lattice;
         // The provider expects the [`wasmcloud_core::InterfaceLinkDefinition`]
         let link = wasmcloud_core::InterfaceLinkDefinition {
             source_id: link.source_id().to_string(),
@@ -2177,21 +2130,10 @@ impl Host {
         };
         let source_id = &link.source_id;
         let target = &link.target;
-        let payload: Bytes = serde_json::to_vec(&link)
-            .context("failed to serialize provider link definition for deletion")?
-            .into();
 
         let (source_result, target_result) = futures::future::join(
-            self.rpc_nats.publish_with_headers(
-                format!("wasmbus.rpc.{lattice}.{source_id}.linkdefs.del"),
-                injector_to_headers(&TraceContextInjector::default_with_span()),
-                payload.clone(),
-            ),
-            self.rpc_nats.publish_with_headers(
-                format!("wasmbus.rpc.{lattice}.{target}.linkdefs.del"),
-                injector_to_headers(&TraceContextInjector::default_with_span()),
-                payload,
-            ),
+            self.provider_manager.delete_link(&link, source_id),
+            self.provider_manager.delete_link(&link, target),
         )
         .await;
 

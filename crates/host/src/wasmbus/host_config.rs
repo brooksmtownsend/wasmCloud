@@ -36,7 +36,7 @@ pub struct Host {
     /// Labels (key-value pairs) to add to the host
     pub labels: HashMap<String, String>,
     /// The server key pair used by this host to generate its public key
-    pub host_key: Option<Arc<KeyPair>>,
+    pub host_key: Arc<KeyPair>,
     /// The amount of time to wait for a provider to gracefully shut down before terminating it
     pub provider_shutdown_delay: Option<Duration>,
     /// Configuration for downloading artifacts from OCI registries
@@ -101,7 +101,7 @@ impl Default for Host {
             lattice: "default".into(),
             js_domain: None,
             labels: HashMap::default(),
-            host_key: None,
+            host_key: Arc::new(KeyPair::new_server()),
             provider_shutdown_delay: None,
             oci_opts: OciConfig::default(),
             allow_file_load: false,

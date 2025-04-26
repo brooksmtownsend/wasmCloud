@@ -20,13 +20,14 @@ use crate::{
         jetstream::create_bucket,
         load_supplemental_config, merge_registry_config,
         nats::{event::NatsEventPublisher, policy::NatsPolicyManager, secrets::NatsSecretsManager},
+        providers::ProviderManager,
         store::StoreManager,
         HostBuilder, SupplementalConfig,
     },
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
 };
 
-use super::ctl::NatsControlInterfaceServer;
+use super::{ctl::NatsControlInterfaceServer, provider::NatsProviderManager};
 
 /// Opinionated [crate::wasmbus::HostBuilder] that uses NATS as the primary transport and implementations
 /// for the [crate::wasmbus::Host] extension traits.
@@ -39,6 +40,7 @@ pub struct NatsHostBuilder {
     // Required fields
     ctl_nats: Client,
     ctl_topic_prefix: String,
+    lattice: String,
     config_generator: Option<BundleGenerator>,
     registry_config: HashMap<String, RegistryConfig>,
     enable_component_auction: bool,
@@ -50,13 +52,14 @@ pub struct NatsHostBuilder {
     policy_manager: Option<Arc<dyn PolicyManager>>,
     secrets_manager: Option<Arc<dyn SecretsManager>>,
     event_publisher: Option<Arc<dyn EventPublisher>>,
+    provider_manager: Arc<dyn ProviderManager>,
 }
 
 impl NatsHostBuilder {
     /// Initialize the host with the NATS control interface connection
-    ///
     pub async fn new(
         ctl_nats: Client,
+        rpc_nats: Client,
         ctl_topic_prefix: String,
         lattice: String,
         js_domain: Option<String>,
@@ -89,13 +92,17 @@ impl NatsHostBuilder {
         // TODO(brooksmtownsend): figure this out where go
         // let config_generator = BundleGenerator::new(config_data.clone());
 
+        let provider_manager = NatsProviderManager::new(rpc_nats.clone(), lattice.clone());
+
         Ok(Self {
             ctl_nats,
             ctl_topic_prefix,
+            lattice,
             config_generator: None,
             registry_config,
             config_store: Arc::new(config_data),
             data_store,
+            provider_manager: Arc::new(provider_manager),
             policy_manager: None,
             secrets_manager: None,
             event_publisher: None,
@@ -108,7 +115,6 @@ impl NatsHostBuilder {
     pub async fn with_policy_manager(
         self,
         host_key: KeyPair,
-        lattice: String,
         labels: HashMap<String, String>,
         policy_topic: Option<String>,
         policy_timeout: Option<Duration>,
@@ -118,7 +124,7 @@ impl NatsHostBuilder {
             self.ctl_nats.clone(),
             PolicyHostInfo {
                 public_key: host_key.public_key(),
-                lattice,
+                lattice: self.lattice.clone(),
                 labels,
             },
             policy_topic,
@@ -152,18 +158,18 @@ impl NatsHostBuilder {
     }
 
     /// Setup the NATS event publisher for the host
-    pub async fn with_event_publisher(
-        self,
-        host_key: KeyPair,
-        lattice: String,
-    ) -> anyhow::Result<Self> {
+    ///
+    /// This will create a new NATS event publisher with the provided source. It's strongly
+    /// recommended to use the host's public key as the source, as this will allow tracing
+    /// events back to the host that published them.
+    pub fn with_event_publisher(self, source: String) -> Self {
         let event_publisher =
-            NatsEventPublisher::new(host_key.public_key(), lattice, self.ctl_nats.clone());
+            NatsEventPublisher::new(source, self.lattice.clone(), self.ctl_nats.clone());
 
-        Ok(NatsHostBuilder {
+        NatsHostBuilder {
             event_publisher: Some(Arc::new(event_publisher)),
             ..self
-        })
+        }
     }
 
     /// Build the [`HostBuilder`] with the NATS extension traits and the provided [`WasmbusHostConfig`].
@@ -173,13 +179,14 @@ impl NatsHostBuilder {
     ) -> anyhow::Result<(HostBuilder, NatsControlInterfaceServer)> {
         Ok((
             HostBuilder::from(config)
-                .with_config_store(Some(self.config_store))
-                .with_data_store(Some(Arc::new(self.data_store.clone())))
                 .with_bundle_generator(self.config_generator)
                 .with_registry_config(self.registry_config)
                 .with_event_publisher(self.event_publisher)
                 .with_policy_manager(self.policy_manager)
-                .with_secrets_manager(self.secrets_manager),
+                .with_secrets_manager(self.secrets_manager)
+                .with_config_store(Some(self.config_store))
+                .with_data_store(Some(Arc::new(self.data_store.clone())))
+                .with_provider_manager(Some(self.provider_manager)),
             NatsControlInterfaceServer::new(
                 self.ctl_nats,
                 self.data_store,

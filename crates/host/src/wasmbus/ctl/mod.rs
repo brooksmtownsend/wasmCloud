@@ -32,7 +32,7 @@ use crate::ResourceRef;
 /// This trait is not a part of the `wasmcloud_control_interface` crate yet to allow
 /// for the initial implementation to be done in the `wasmcloud_host` (pre 1.0) crate. This
 /// will likely move to that crate in the future.
-pub(crate) trait ControlInterfaceServer {
+pub(crate) trait ControlInterfaceServer: Send + Sync {
     /// Handle an auction request for a component. This method should return `Ok(None)` if the host
     /// does not want to respond to the auction request.
     async fn handle_auction_component(

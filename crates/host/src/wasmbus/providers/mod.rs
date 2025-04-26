@@ -38,6 +38,20 @@ use super::Host;
 mod http_server;
 mod messaging_nats;
 
+#[async_trait::async_trait]
+pub trait ProviderManager: Send + Sync {
+    async fn put_link(
+        &self,
+        link: &wasmcloud_core::InterfaceLinkDefinition,
+        target: &str,
+    ) -> anyhow::Result<()>;
+    async fn delete_link(
+        &self,
+        link: &wasmcloud_core::InterfaceLinkDefinition,
+        target: &str,
+    ) -> anyhow::Result<()>;
+}
+
 /// An Provider instance
 #[derive(Debug)]
 pub(crate) struct Provider {

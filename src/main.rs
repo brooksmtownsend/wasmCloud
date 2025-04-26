@@ -19,7 +19,7 @@ use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
 use wasmcloud_host::wasmbus::nats::builder::NatsHostBuilder;
-use wasmcloud_host::wasmbus::{connect_nats, Features};
+use wasmcloud_host::wasmbus::{nats::connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
 use wasmcloud_host::WasmbusHostConfig;
 use wasmcloud_tracing::configure_observability;
@@ -453,7 +453,8 @@ async fn main() -> anyhow::Result<()> {
         .map(KeyPair::from_seed)
         .transpose()
         .context("failed to construct host key pair from seed")?
-        .map(Arc::new);
+        .map(Arc::new)
+        .unwrap_or_else(|| Arc::new(KeyPair::new_server()));
     let (nats_jwt, nats_key) =
         parse_nats_credentials(args.nats_creds, args.nats_jwt, args.nats_seed)
             .await
@@ -516,13 +517,26 @@ async fn main() -> anyhow::Result<()> {
         ctl_key.or_else(|| nats_key.clone()),
         args.ctl_tls,
         None,
-        workload_identity_config,
+        workload_identity_config.clone(),
     )
     .await
     .context("failed to establish NATS control connection")?;
 
+    // TODO(brooksmtownsend): We could probs just push this into the builder
+    let rpc_nats = connect_nats(
+        rpc_nats_url.as_str(),
+        rpc_jwt.clone().or_else(|| nats_jwt.clone()).as_ref(),
+        rpc_key.clone().or_else(|| nats_key.clone()),
+        args.rpc_tls,
+        Some(args.rpc_timeout_ms),
+        workload_identity_config,
+    )
+    .await
+    .context("failed to establish NATS RPC connection")?;
+
     let builder = NatsHostBuilder::new(
         ctl_nats,
+        rpc_nats,
         args.ctl_topic_prefix,
         args.lattice.clone(),
         args.js_domain.clone(),
@@ -532,7 +546,8 @@ async fn main() -> anyhow::Result<()> {
         args.enable_component_auction.unwrap_or(true),
         args.enable_provider_auction.unwrap_or(true),
     )
-    .await?;
+    .await?
+    .with_event_publisher(host_key.public_key());
 
     let (host_builder, nats_ctl_server) = builder
         .build(WasmbusHostConfig {
