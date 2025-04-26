@@ -537,10 +537,10 @@ async fn main() -> anyhow::Result<()> {
     let builder = NatsHostBuilder::new(
         ctl_nats,
         rpc_nats,
-        args.ctl_topic_prefix,
+        Some(args.ctl_topic_prefix),
         args.lattice.clone(),
         args.js_domain.clone(),
-        oci_opts.clone(),
+        Some(oci_opts.clone()),
         labels.clone().into_iter().collect(),
         args.config_service_enabled,
         args.enable_component_auction.unwrap_or(true),
@@ -548,6 +548,34 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?
     .with_event_publisher(host_key.public_key());
+
+    let builder = if let Some(policy_topic) = args.policy_topic.as_deref() {
+        anyhow::ensure!(
+            validate_nats_subject(policy_topic).is_ok(),
+            "Invalid policy topic"
+        );
+        builder
+            .with_policy_manager(
+                host_key.clone(),
+                labels.clone(),
+                args.policy_topic.clone(),
+                args.policy_timeout_ms,
+                args.policy_changes_topic.clone(),
+            )
+            .await?
+    } else {
+        builder
+    };
+
+    let builder = if let Some(secrets_topic) = args.secrets_topic_prefix {
+        anyhow::ensure!(
+            validate_nats_subject(&secrets_topic).is_ok(),
+            "Invalid secrets topic"
+        );
+        builder.with_secrets_manager(secrets_topic)?
+    } else {
+        builder
+    };
 
     let (host_builder, nats_ctl_server) = builder
         .build(WasmbusHostConfig {
@@ -567,7 +595,6 @@ async fn main() -> anyhow::Result<()> {
             log_level,
             enable_structured_logging: args.enable_structured_logging,
             otel_config,
-            secrets_topic_prefix: args.secrets_topic_prefix,
             version: env!("CARGO_PKG_VERSION").to_string(),
             max_execution_time: args.max_execution_time,
             max_linear_memory: args.max_linear_memory,

@@ -9,6 +9,7 @@ use std::{
 use anyhow::ensure;
 use async_nats::{jetstream::kv::Store, Client};
 use nkeys::KeyPair;
+use tracing::debug;
 use wasmcloud_core::RegistryConfig;
 
 use crate::{
@@ -26,6 +27,8 @@ use crate::{
     },
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
 };
+
+const DEFAULT_CTL_TOPIC_PREFIX: &str = "wasmbus.ctl";
 
 use super::{ctl::NatsControlInterfaceServer, provider::NatsProviderManager};
 
@@ -60,10 +63,10 @@ impl NatsHostBuilder {
     pub async fn new(
         ctl_nats: Client,
         rpc_nats: Client,
-        ctl_topic_prefix: String,
+        ctl_topic_prefix: Option<String>,
         lattice: String,
         js_domain: Option<String>,
-        oci_opts: oci::Config,
+        oci_opts: Option<oci::Config>,
         labels: BTreeMap<String, String>,
         config_service_enabled: bool,
         enable_component_auction: bool,
@@ -87,7 +90,10 @@ impl NatsHostBuilder {
         };
 
         let mut registry_config = supplemental_config.registry_config.unwrap_or_default();
-        merge_registry_config(&mut registry_config, oci_opts).await;
+        if let Some(oci_opts) = oci_opts {
+            debug!("supplementing OCI config with OCI options");
+            merge_registry_config(&mut registry_config, oci_opts).await;
+        }
 
         // TODO(brooksmtownsend): figure this out where go
         // let config_generator = BundleGenerator::new(config_data.clone());
@@ -96,7 +102,8 @@ impl NatsHostBuilder {
 
         Ok(Self {
             ctl_nats,
-            ctl_topic_prefix,
+            ctl_topic_prefix: ctl_topic_prefix
+                .unwrap_or_else(|| DEFAULT_CTL_TOPIC_PREFIX.to_string()),
             lattice,
             config_generator: None,
             registry_config,
@@ -114,7 +121,7 @@ impl NatsHostBuilder {
     /// Setup the NATS policy manager for the host
     pub async fn with_policy_manager(
         self,
-        host_key: KeyPair,
+        host_key: Arc<KeyPair>,
         labels: HashMap<String, String>,
         policy_topic: Option<String>,
         policy_timeout: Option<Duration>,
@@ -140,7 +147,7 @@ impl NatsHostBuilder {
     }
 
     /// Setup the NATS secrets manager for the host
-    pub async fn with_secrets_manager(self, secrets_topic_prefix: String) -> anyhow::Result<Self> {
+    pub fn with_secrets_manager(self, secrets_topic_prefix: String) -> anyhow::Result<Self> {
         ensure!(
             !secrets_topic_prefix.is_empty(),
             "secrets topic prefix must be non-empty"

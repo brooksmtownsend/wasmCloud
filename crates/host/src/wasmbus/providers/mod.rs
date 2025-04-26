@@ -179,8 +179,6 @@ impl Host {
         // The provider itself needs to know its private key
         let provider_xkey_private_key = if let Ok(seed) = provider_xkey.seed() {
             seed
-        } else if self.host_config.secrets_topic_prefix.is_none() {
-            "".to_string()
         } else {
             // This should never happen since this returns an error when an Xkey is
             // created from a public key, but if we can't generate one for whatever
