@@ -3,7 +3,9 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{bail, Context as _};
+use async_nats::jetstream::kv::Store;
 use nkeys::KeyPair;
+use tracing::{info, instrument};
 
 use crate::workload_identity::WorkloadIdentityConfig;
 
@@ -77,4 +79,32 @@ pub async fn connect_nats(
     opts.connect(addr)
         .await
         .context("failed to connect to NATS")
+}
+
+#[instrument(level = "debug", skip_all)]
+pub(crate) async fn create_bucket(
+    jetstream: &async_nats::jetstream::Context,
+    bucket: &str,
+) -> anyhow::Result<Store> {
+    // Don't create the bucket if it already exists
+    if let Ok(store) = jetstream.get_key_value(bucket).await {
+        info!(%bucket, "bucket already exists. Skipping creation.");
+        return Ok(store);
+    }
+
+    match jetstream
+        .create_key_value(async_nats::jetstream::kv::Config {
+            bucket: bucket.to_string(),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(store) => {
+            info!(%bucket, "created bucket with 1 replica");
+            Ok(store)
+        }
+        Err(err) => {
+            Err(anyhow::anyhow!(err).context(format!("failed to create bucket '{bucket}'")))
+        }
+    }
 }

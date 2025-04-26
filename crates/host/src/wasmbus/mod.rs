@@ -28,7 +28,6 @@ use providers::{Provider, ProviderManager};
 use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use store::{DefaultStore, StoreManager};
 use sysinfo::System;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpListener;
@@ -58,6 +57,7 @@ use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 use crate::policy::DefaultPolicyManager;
 use crate::registry::RegistryCredentialExt;
 use crate::secrets::{DefaultSecretsManager, SecretsManager};
+use crate::store::{DefaultStore, StoreManager};
 use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
@@ -77,9 +77,6 @@ pub mod ctl;
 
 /// Configuration service
 pub mod config;
-
-/// Data store abstraction
-pub mod store;
 
 /// wasmCloud host configuration
 pub mod host_config;

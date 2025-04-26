@@ -15,14 +15,13 @@ use wasmcloud_core::RegistryConfig;
 use crate::{
     oci,
     secrets::SecretsManager,
+    store::StoreManager,
     wasmbus::{
         config::BundleGenerator,
         event::EventPublisher,
-        jetstream::create_bucket,
         load_supplemental_config, merge_registry_config,
         nats::{event::NatsEventPublisher, policy::NatsPolicyManager, secrets::NatsSecretsManager},
         providers::ProviderManager,
-        store::StoreManager,
         HostBuilder, SupplementalConfig,
     },
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
@@ -30,7 +29,7 @@ use crate::{
 
 const DEFAULT_CTL_TOPIC_PREFIX: &str = "wasmbus.ctl";
 
-use super::{ctl::NatsControlInterfaceServer, provider::NatsProviderManager};
+use super::{create_bucket, ctl::NatsControlInterfaceServer, provider::NatsProviderManager};
 
 /// Opinionated [crate::wasmbus::HostBuilder] that uses NATS as the primary transport and implementations
 /// for the [crate::wasmbus::Host] extension traits.

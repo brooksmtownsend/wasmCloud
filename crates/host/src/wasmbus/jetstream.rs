@@ -1,10 +1,9 @@
 //! Host interactions with JetStream, including processing of KV entries and
 //! storing/retrieving component specifications.
 
-use anyhow::{anyhow, ensure, Context as _};
-use async_nats::jetstream::kv::{Entry as KvEntry, Operation, Store};
+use anyhow::{ensure, Context as _};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use wasmcloud_control_interface::Link;
 
 use crate::wasmbus::claims::{Claims, StoredClaims};
@@ -222,78 +221,5 @@ impl super::Host {
         }
 
         Ok(())
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    pub(crate) async fn process_entry(
-        &self,
-        KvEntry {
-            key,
-            value,
-            operation,
-            ..
-        }: KvEntry,
-    ) {
-        let key_id = key.split_once('_');
-        let res = match (operation, key_id) {
-            (Operation::Put, Some(("COMPONENT", id))) => {
-                self.process_component_spec_put(id, value).await
-            }
-            (Operation::Delete, Some(("COMPONENT", id))) => {
-                self.process_component_spec_delete(id).await
-            }
-            (Operation::Put, Some(("LINKDEF", _id))) => {
-                debug!("ignoring deprecated LINKDEF put operation");
-                Ok(())
-            }
-            (Operation::Delete, Some(("LINKDEF", _id))) => {
-                debug!("ignoring deprecated LINKDEF delete operation");
-                Ok(())
-            }
-            (Operation::Put, Some(("CLAIMS", pubkey))) => {
-                self.process_claims_put(pubkey, value).await
-            }
-            (Operation::Delete, Some(("CLAIMS", pubkey))) => {
-                self.process_claims_delete(pubkey, value).await
-            }
-            (operation, Some(("REFMAP", id))) => {
-                // TODO: process REFMAP entries
-                debug!(?operation, id, "ignoring REFMAP entry");
-                Ok(())
-            }
-            _ => {
-                warn!(key, ?operation, "unsupported KV bucket entry");
-                Ok(())
-            }
-        };
-        if let Err(error) = &res {
-            error!(key, ?operation, ?error, "failed to process KV bucket entry");
-        }
-    }
-}
-
-#[instrument(level = "debug", skip_all)]
-pub(crate) async fn create_bucket(
-    jetstream: &async_nats::jetstream::Context,
-    bucket: &str,
-) -> anyhow::Result<Store> {
-    // Don't create the bucket if it already exists
-    if let Ok(store) = jetstream.get_key_value(bucket).await {
-        info!(%bucket, "bucket already exists. Skipping creation.");
-        return Ok(store);
-    }
-
-    match jetstream
-        .create_key_value(async_nats::jetstream::kv::Config {
-            bucket: bucket.to_string(),
-            ..Default::default()
-        })
-        .await
-    {
-        Ok(store) => {
-            info!(%bucket, "created bucket with 1 replica");
-            Ok(store)
-        }
-        Err(err) => Err(anyhow!(err).context(format!("failed to create bucket '{bucket}'"))),
     }
 }

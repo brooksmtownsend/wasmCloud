@@ -14,7 +14,7 @@ use wasmcloud_secrets_client::Client as WasmcloudSecretsClient;
 use wasmcloud_secrets_types::{Secret as WasmcloudSecret, SecretConfig};
 
 use crate::secrets::SecretsManager;
-use crate::wasmbus::store::StoreManager;
+use crate::store::StoreManager;
 
 /// A manager for fetching secrets from a secret store, caching secrets clients for efficiency.
 pub struct NatsSecretsManager {

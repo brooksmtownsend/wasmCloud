@@ -10,6 +10,64 @@ use wascap::jwt;
 // per-request type
 pub(crate) const POLICY_TYPE_VERSION: &str = "v1";
 
+/// A trait for evaluating policy decisions
+#[async_trait::async_trait]
+pub trait PolicyManager: Send + Sync {
+    /// Evaluate whether a component may be started
+    async fn evaluate_start_component(
+        &self,
+        _component_id: &str,
+        _image_ref: &str,
+        _max_instances: u32,
+        _annotations: &BTreeMap<String, String>,
+        _claims: Option<&jwt::Claims<jwt::Component>>,
+    ) -> anyhow::Result<Response> {
+        Ok(Response {
+            request_id: Uuid::new_v4().to_string(),
+            permitted: true,
+            message: None,
+        })
+    }
+
+    /// Evaluate whether a provider may be started
+    async fn evaluate_start_provider(
+        &self,
+        _provider_id: &str,
+        _provider_ref: &str,
+        _annotations: &BTreeMap<String, String>,
+        _claims: Option<&jwt::Claims<jwt::CapabilityProvider>>,
+    ) -> anyhow::Result<Response> {
+        Ok(Response {
+            request_id: Uuid::new_v4().to_string(),
+            permitted: true,
+            message: None,
+        })
+    }
+
+    /// Evaluate whether a component may perform an invocation
+    async fn evaluate_perform_invocation(
+        &self,
+        _component_id: &str,
+        _image_ref: &str,
+        _annotations: &BTreeMap<String, String>,
+        _claims: Option<&jwt::Claims<jwt::Component>>,
+        _interface: String,
+        _function: String,
+    ) -> anyhow::Result<Response> {
+        Ok(Response {
+            request_id: Uuid::new_v4().to_string(),
+            permitted: true,
+            message: None,
+        })
+    }
+}
+
+/// A default policy manager that always returns true for all requests
+/// This is used when no policy manager is configured
+#[derive(Default)]
+pub struct DefaultPolicyManager;
+impl super::PolicyManager for DefaultPolicyManager {}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Hash)]
 /// Claims associated with a policy request, if embedded inside the component or provider
 pub struct PolicyClaims {
@@ -214,61 +272,3 @@ impl From<&jwt::Claims<jwt::CapabilityProvider>> for PolicyClaims {
         }
     }
 }
-
-/// A trait for evaluating policy decisions
-#[async_trait::async_trait]
-pub trait PolicyManager: Send + Sync {
-    /// Evaluate whether a component may be started
-    async fn evaluate_start_component(
-        &self,
-        _component_id: &str,
-        _image_ref: &str,
-        _max_instances: u32,
-        _annotations: &BTreeMap<String, String>,
-        _claims: Option<&jwt::Claims<jwt::Component>>,
-    ) -> anyhow::Result<Response> {
-        Ok(Response {
-            request_id: Uuid::new_v4().to_string(),
-            permitted: true,
-            message: None,
-        })
-    }
-
-    /// Evaluate whether a provider may be started
-    async fn evaluate_start_provider(
-        &self,
-        _provider_id: &str,
-        _provider_ref: &str,
-        _annotations: &BTreeMap<String, String>,
-        _claims: Option<&jwt::Claims<jwt::CapabilityProvider>>,
-    ) -> anyhow::Result<Response> {
-        Ok(Response {
-            request_id: Uuid::new_v4().to_string(),
-            permitted: true,
-            message: None,
-        })
-    }
-
-    /// Evaluate whether a component may perform an invocation
-    async fn evaluate_perform_invocation(
-        &self,
-        _component_id: &str,
-        _image_ref: &str,
-        _annotations: &BTreeMap<String, String>,
-        _claims: Option<&jwt::Claims<jwt::Component>>,
-        _interface: String,
-        _function: String,
-    ) -> anyhow::Result<Response> {
-        Ok(Response {
-            request_id: Uuid::new_v4().to_string(),
-            permitted: true,
-            message: None,
-        })
-    }
-}
-
-/// A default policy manager that always returns true for all requests
-/// This is used when no policy manager is configured
-#[derive(Default)]
-pub struct DefaultPolicyManager;
-impl super::PolicyManager for DefaultPolicyManager {}

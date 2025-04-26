@@ -2,15 +2,14 @@
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use anyhow::{bail, Context};
-use async_nats::jetstream::kv::{Operation, Store};
-use futures::{future::AbortHandle, stream::Abortable, TryStreamExt};
+use futures::{future::AbortHandle, stream::Abortable};
 use tokio::sync::{
     watch::{self, Receiver, Sender},
     RwLock, RwLockReadGuard,
 };
 use tracing::{error, warn, Instrument};
 
-use super::store::StoreManager;
+use crate::store::StoreManager;
 
 type LockedConfig = Arc<RwLock<HashMap<String, String>>>;
 /// A cache of named config mapped to an existing receiver
@@ -267,71 +266,6 @@ impl BundleGenerator {
             .insert(name.clone(), rx.clone());
 
         Ok(ConfigReceiver { name, receiver: rx })
-    }
-}
-
-//TODO(brooksmtownsend): Reinstate this
-#[allow(dead_code)]
-async fn watcher_loop(
-    store: Store,
-    name: String,
-    tx: watch::Sender<HashMap<String, String>>,
-    done: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-) {
-    // We need to watch with history so we can get the initial config.
-    let mut watcher = match store.watch(&name).await {
-        Ok(watcher) => {
-            done.send(Ok(())).expect(
-                "Receiver for watcher setup should not have been dropped. This is programmer error",
-            );
-            watcher
-        }
-        Err(e) => {
-            done.send(Err(anyhow::anyhow!(
-                "Error setting up watcher for {}: {}",
-                name,
-                e
-            )))
-            .expect(
-                "Receiver for watcher setup should not have been dropped. This is programmer error",
-            );
-            return;
-        }
-    };
-    loop {
-        match watcher.try_next().await {
-            Ok(Some(entry)) if matches!(entry.operation, Operation::Delete | Operation::Purge) => {
-                // NOTE(thomastaylor312): We should probably do something and notify something up
-                // the chain if we get a delete or purge event of a config that is still being used.
-                // For now we just zero it out
-                tx.send_replace(HashMap::new());
-            }
-            Ok(Some(entry)) => {
-                let config: HashMap<String, String> = match serde_json::from_slice(&entry.value) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        error!(%name, error = %e, "Error decoding config from store during watch");
-                        continue;
-                    }
-                };
-                tx.send_if_modified(|current| {
-                    if current == &config {
-                        false
-                    } else {
-                        *current = config;
-                        true
-                    }
-                });
-            }
-            Ok(None) => {
-                error!(%name, "Watcher for config has closed");
-                return;
-            }
-            Err(e) => {
-                error!(%name, error = %e, "Error reading from watcher for config. Will wait for next entry");
-                continue;
-            }
-        }
     }
 }
 
