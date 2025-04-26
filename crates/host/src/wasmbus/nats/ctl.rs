@@ -4,16 +4,18 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use futures::future::Either;
 use futures::stream::SelectAll;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryFutureExt as _};
 use nkeys::KeyPair;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio::task::JoinSet;
 use tracing::{error, instrument, trace, warn};
 use wasmcloud_control_interface::CtlResponse;
 use wasmcloud_core::CTL_API_VERSION_1;
+use wasmcloud_tracing::context::TraceContextInjector;
 
-use crate::wasmbus::serialize_ctl_response;
+use crate::wasmbus::{injector_to_headers, serialize_ctl_response};
 
 #[derive(Debug)]
 pub(crate) struct Queue {
@@ -261,69 +263,90 @@ impl crate::wasmbus::Host {
     }
 }
 
-// let nats_control_queue = if let (Some(ctl_nats), Some(ctl_topic_prefix)) =
-//     (self.ctl_nats, self.ctl_topic_prefix)
-// {
-//     let queue = Queue::new(
-//         &ctl_nats,
-//         &ctl_topic_prefix,
-//         &host.host_config.lattice,
-//         &host.host_key,
-//         enable_component_auction,
-//         enable_provider_auction,
-//     )
-//     .await
-//     .context("failed to initialize queue")?;
+pub struct NatsControlInterfaceServer {
+    ctl_nats: Arc<async_nats::Client>,
+    ctl_topic_prefix: String,
+    enable_component_auction: bool,
+    enable_provider_auction: bool,
+}
 
-//     let queue = spawn({
-//         let ctl_nats = Arc::new(ctl_nats.clone());
-//         let host = Arc::clone(&host);
-//         async move {
-//             queue
-//             .for_each_concurrent(None, {
-//                 let host = Arc::clone(&host);
-//                 let ctl_nats = Arc::clone(&ctl_nats);
-//                 move |msg| {
-//                     let host = Arc::clone(&host);
-//                     let ctl_nats = Arc::clone(&ctl_nats);
-//                     async move {
-//                         let msg_subject = msg.subject.clone();
-//                         let msg_reply = msg.reply.clone();
-//                         let payload = host.handle_ctl_message(msg).await;
-//                         if let Some(reply) = msg_reply {
-//                             // TODO: ensure this is instrumented properly
-//                             let headers = injector_to_headers(&TraceContextInjector::default_with_span());
-//                             if let Some(payload) = payload {
-//                                 let max_payload = ctl_nats.server_info().max_payload;
-//                                 if payload.len() > max_payload {
-//                                     warn!(
-//                                         size = payload.len(),
-//                                         max_size = max_payload,
-//                                         "ctl response payload is too large to publish and may fail",
-//                                     );
-//                                 }
-//                                 if let Err(err) =
-//                                     ctl_nats
-//                                     .publish_with_headers(reply.clone(), headers, payload)
-//                                     .err_into::<anyhow::Error>()
-//                                     .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
-//                                     .await
-//                                 {
-//                                     tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
-//                                 }
-//                             }
-//                         }
-//                     }
-//                 }
-//             })
-//             .await;
+impl NatsControlInterfaceServer {
+    pub fn new(
+        ctl_nats: async_nats::Client,
+        ctl_topic_prefix: String,
+        enable_component_auction: bool,
+        enable_provider_auction: bool,
+    ) -> Self {
+        Self {
+            ctl_nats: Arc::new(ctl_nats),
+            ctl_topic_prefix,
+            enable_component_auction,
+            enable_provider_auction,
+        }
+    }
 
-//             let deadline = { *host.stop_rx.borrow() };
-//             host.stop_tx.send_replace(deadline);
-//         }
-//     });
+    #[instrument(level = "trace", skip_all)]
+    pub async fn start(&self, host: Arc<crate::wasmbus::Host>) -> anyhow::Result<JoinSet<()>> {
+        let queue = Queue::new(
+            &self.ctl_nats,
+            &self.ctl_topic_prefix,
+            &host.host_config.lattice,
+            &host.host_key,
+            self.enable_component_auction,
+            self.enable_provider_auction,
+        )
+        .await
+        .context("failed to initialize queue")?;
 
-//     Some(queue)
-// } else {
-//     None
-// };
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let ctl_nats = Arc::clone(&self.ctl_nats);
+            let host = Arc::clone(&host);
+            async move {
+                queue
+                    .for_each_concurrent(None, {
+                        let host = Arc::clone(&host);
+                        let ctl_nats = Arc::clone(&ctl_nats);
+                        move |msg| {
+                            let host = Arc::clone(&host);
+                            let ctl_nats = Arc::clone(&ctl_nats);
+                            async move {
+                                let msg_subject = msg.subject.clone();
+                                let msg_reply = msg.reply.clone();
+                                let payload = host.handle_ctl_message(msg).await;
+                                if let Some(reply) = msg_reply {
+                                    // TODO(brooksmtownsend): ensure this is instrumented properly
+                                    let headers = injector_to_headers(&TraceContextInjector::default_with_span());
+                                    if let Some(payload) = payload {
+                                        let max_payload = ctl_nats.server_info().max_payload;
+                                        if payload.len() > max_payload {
+                                            warn!(
+                                                size = payload.len(),
+                                                max_size = max_payload,
+                                                "ctl response payload is too large to publish and may fail",
+                                            );
+                                        }
+                                        if let Err(err) =
+                                            ctl_nats
+                                            .publish_with_headers(reply.clone(), headers, payload)
+                                            .err_into::<anyhow::Error>()
+                                            .and_then(|()| ctl_nats.flush().err_into::<anyhow::Error>())
+                                            .await
+                                        {
+                                            tracing::error!(%msg_subject, ?err, "failed to publish reply to control interface request");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .await;
+
+                let deadline = { *host.stop_rx.borrow() };
+                host.stop_tx.send_replace(deadline);
+            }
+        });
+
+        Ok(tasks)
+    }
+}

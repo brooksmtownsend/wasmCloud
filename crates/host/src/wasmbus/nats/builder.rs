@@ -26,12 +26,16 @@ use crate::{
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
 };
 
+use super::ctl::NatsControlInterfaceServer;
+
 pub struct NatsHostBuilder {
     // Required fields
     ctl_nats: Client,
     ctl_topic_prefix: String,
     config_generator: Option<BundleGenerator>,
     registry_config: HashMap<String, RegistryConfig>,
+    enable_component_auction: bool,
+    enable_provider_auction: bool,
 
     // Trait implementations for NATS
     config_store: Arc<dyn StoreManager>,
@@ -49,9 +53,11 @@ impl NatsHostBuilder {
         ctl_topic_prefix: String,
         lattice: String,
         js_domain: Option<String>,
-        config_service_enabled: bool,
         oci_opts: oci::Config,
         labels: BTreeMap<String, String>,
+        config_service_enabled: bool,
+        enable_component_auction: bool,
+        enable_provider_auction: bool,
     ) -> anyhow::Result<Self> {
         let ctl_jetstream = if let Some(domain) = js_domain.as_ref() {
             async_nats::jetstream::with_domain(ctl_nats.clone(), domain)
@@ -85,6 +91,8 @@ impl NatsHostBuilder {
             policy_manager: None,
             secrets_manager: None,
             event_publisher: None,
+            enable_component_auction,
+            enable_provider_auction,
         })
     }
 
@@ -151,14 +159,25 @@ impl NatsHostBuilder {
     }
 
     /// Build the [`HostBuilder`] with the NATS extension traits and the provided [`WasmbusHostConfig`].
-    pub async fn build(self, config: WasmbusHostConfig) -> anyhow::Result<HostBuilder> {
-        Ok(HostBuilder::from(config)
-            .with_config_store(Some(self.config_store))
-            .with_data_store(Some(self.data_store))
-            .with_bundle_generator(self.config_generator)
-            .with_registry_config(self.registry_config)
-            .with_event_publisher(self.event_publisher)
-            .with_policy_manager(self.policy_manager)
-            .with_secrets_manager(self.secrets_manager))
+    pub async fn build(
+        self,
+        config: WasmbusHostConfig,
+    ) -> anyhow::Result<(HostBuilder, NatsControlInterfaceServer)> {
+        Ok((
+            HostBuilder::from(config)
+                .with_config_store(Some(self.config_store))
+                .with_data_store(Some(self.data_store))
+                .with_bundle_generator(self.config_generator)
+                .with_registry_config(self.registry_config)
+                .with_event_publisher(self.event_publisher)
+                .with_policy_manager(self.policy_manager)
+                .with_secrets_manager(self.secrets_manager),
+            NatsControlInterfaceServer::new(
+                self.ctl_nats,
+                self.ctl_topic_prefix,
+                self.enable_component_auction,
+                self.enable_provider_auction,
+            ),
+        ))
     }
 }

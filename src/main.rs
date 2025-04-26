@@ -528,51 +528,55 @@ async fn main() -> anyhow::Result<()> {
     let builder = NatsHostBuilder::new(
         ctl_nats,
         args.ctl_topic_prefix,
-        args.lattice,
-        args.js_domain,
+        args.lattice.clone(),
+        args.js_domain.clone(),
+        oci_opts.clone(),
+        labels.clone().into_iter().collect(),
         args.config_service_enabled,
-        oci_opts,
-        labels,
+        args.enable_component_auction.unwrap_or(true),
+        args.enable_provider_auction.unwrap_or(true),
     )
     .await?;
 
-    let (host, shutdown) = Box::pin(
-        builder
-            .build(WasmbusHostConfig {
-                lattice: Arc::from(args.lattice.clone()),
-                host_key: host_key.clone(),
-                config_service_enabled: args.config_service_enabled,
-                js_domain: args.js_domain,
-                labels,
-                provider_shutdown_delay: Some(args.provider_shutdown_delay),
-                oci_opts,
-                rpc_nats_url,
-                rpc_timeout: args.rpc_timeout_ms,
-                rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
-                rpc_key: rpc_key.or_else(|| nats_key.clone()),
-                rpc_tls: args.rpc_tls,
-                allow_file_load: args.allow_file_load,
-                log_level,
-                enable_structured_logging: args.enable_structured_logging,
-                otel_config,
-                secrets_topic_prefix: args.secrets_topic_prefix,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                max_execution_time: args.max_execution_time,
-                max_linear_memory: args.max_linear_memory,
-                max_component_size: args.max_component_size,
-                max_components: args.max_components,
-                max_core_instances_per_component: args.max_core_instances_per_component,
-                heartbeat_interval: args.heartbeat_interval,
-                experimental_features,
-                http_admin: args.http_admin,
-                enable_component_auction: args.enable_component_auction.unwrap_or(true),
-                enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
-            })
-            .await?
-            .build(),
-    )
-    .await
-    .context("failed to initialize host")?;
+    let (host_builder, nats_ctl_server) = builder
+        .build(WasmbusHostConfig {
+            lattice: Arc::from(args.lattice.clone()),
+            host_key: host_key.clone(),
+            config_service_enabled: args.config_service_enabled,
+            js_domain: args.js_domain,
+            labels,
+            provider_shutdown_delay: Some(args.provider_shutdown_delay),
+            oci_opts,
+            rpc_nats_url,
+            rpc_timeout: args.rpc_timeout_ms,
+            rpc_jwt: rpc_jwt.or_else(|| nats_jwt.clone()),
+            rpc_key: rpc_key.or_else(|| nats_key.clone()),
+            rpc_tls: args.rpc_tls,
+            allow_file_load: args.allow_file_load,
+            log_level,
+            enable_structured_logging: args.enable_structured_logging,
+            otel_config,
+            secrets_topic_prefix: args.secrets_topic_prefix,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            max_execution_time: args.max_execution_time,
+            max_linear_memory: args.max_linear_memory,
+            max_component_size: args.max_component_size,
+            max_components: args.max_components,
+            max_core_instances_per_component: args.max_core_instances_per_component,
+            heartbeat_interval: args.heartbeat_interval,
+            experimental_features,
+            http_admin: args.http_admin,
+            enable_component_auction: args.enable_component_auction.unwrap_or(true),
+            enable_provider_auction: args.enable_provider_auction.unwrap_or(true),
+        })
+        .await?;
+    let (host, shutdown) = host_builder
+        .build()
+        .await
+        .context("failed to initialize host")?;
+
+    // Start the control interface server
+    let mut ctl = nats_ctl_server.start(host.clone()).await?;
 
     #[cfg(unix)]
     let deadline = {
@@ -594,6 +598,8 @@ async fn main() -> anyhow::Result<()> {
         },
         deadline = host.stopped() => deadline?,
     };
+    // TODO(brooksmtownsend): Consider a drain of sorts that can wrap up pending persistent work
+    ctl.abort_all();
     drop(host);
     if let Some(deadline) = deadline {
         timeout_at(deadline, shutdown)

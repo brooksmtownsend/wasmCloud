@@ -172,7 +172,7 @@ struct WrpcServer {
     id: Arc<str>,
     image_reference: Arc<str>,
     annotations: Arc<Annotations>,
-    policy_manager: Arc<dyn PolicyManager + Send + Sync>,
+    policy_manager: Arc<dyn PolicyManager>,
     metrics: Arc<HostMetrics>,
 }
 
@@ -367,21 +367,22 @@ pub struct Host {
     metrics: Arc<HostMetrics>,
 
     /// The event publisher used for emitting events from the host.
-    pub(crate) event_publisher: Arc<dyn EventPublisher + Send + Sync>,
+    pub(crate) event_publisher: Arc<dyn EventPublisher>,
 
     /// The policy manager used for evaluating policy decisions.
-    policy_manager: Arc<dyn PolicyManager + Send + Sync>,
+    policy_manager: Arc<dyn PolicyManager>,
 
     /// The secrets manager used for managing and retrieving secrets.
-    secrets_manager: Arc<dyn SecretsManager + Send + Sync>,
+    secrets_manager: Arc<dyn SecretsManager>,
 
     /// The configuration manager for managing component, provider, link, and secret configurations.
-    config_store: Arc<dyn StoreManager + Send + Sync>,
+    config_store: Arc<dyn StoreManager>,
 
     /// The data store for managing links, claims, and component specifications.
-    data_store: Arc<dyn StoreManager + Send + Sync>,
+    data_store: Arc<dyn StoreManager>,
 
     /// The generator for creating configuration bundles.
+    //TODO(brooksmtownsend): Trait, that maybe the host doesn't need to manage explicitly
     config_generator: BundleGenerator,
 
     /// A set of tasks managed by the host.
