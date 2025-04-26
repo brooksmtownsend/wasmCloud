@@ -19,17 +19,9 @@ pub trait StoreManager: Send + Sync {
 }
 
 /// A struct that implements the ConfigManager trait, storing data in an in-memory HashMap.
+#[derive(Default)]
 pub struct DefaultStore {
     store: RwLock<HashMap<String, Bytes>>,
-}
-
-impl DefaultStore {
-    /// Creates a new instance of DefaultStore with an empty HashMap.
-    pub fn new() -> Self {
-        Self {
-            store: RwLock::new(HashMap::new()),
-        }
-    }
 }
 
 #[async_trait::async_trait]

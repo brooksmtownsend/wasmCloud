@@ -44,7 +44,7 @@ pub struct NatsHostBuilder {
     ctl_nats: Client,
     ctl_topic_prefix: String,
     lattice: String,
-    config_generator: Option<BundleGenerator>,
+    config_generator: BundleGenerator,
     registry_config: HashMap<String, RegistryConfig>,
     enable_component_auction: bool,
     enable_provider_auction: bool,
@@ -60,6 +60,7 @@ pub struct NatsHostBuilder {
 
 impl NatsHostBuilder {
     /// Initialize the host with the NATS control interface connection
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         ctl_nats: Client,
         rpc_nats: Client,
@@ -96,7 +97,7 @@ impl NatsHostBuilder {
         }
 
         // TODO(brooksmtownsend): figure this out where go
-        // let config_generator = BundleGenerator::new(config_data.clone());
+        let config_generator = BundleGenerator::new(Arc::new(config_data.clone()));
 
         let provider_manager = NatsProviderManager::new(rpc_nats.clone(), lattice.clone());
 
@@ -105,7 +106,7 @@ impl NatsHostBuilder {
             ctl_topic_prefix: ctl_topic_prefix
                 .unwrap_or_else(|| DEFAULT_CTL_TOPIC_PREFIX.to_string()),
             lattice,
-            config_generator: None,
+            config_generator,
             registry_config,
             config_store: Arc::new(config_data),
             data_store,
@@ -186,11 +187,11 @@ impl NatsHostBuilder {
     ) -> anyhow::Result<(HostBuilder, NatsControlInterfaceServer)> {
         Ok((
             HostBuilder::from(config)
-                .with_bundle_generator(self.config_generator)
                 .with_registry_config(self.registry_config)
                 .with_event_publisher(self.event_publisher)
                 .with_policy_manager(self.policy_manager)
                 .with_secrets_manager(self.secrets_manager)
+                .with_bundle_generator(Some(self.config_generator))
                 .with_config_store(Some(self.config_store))
                 .with_data_store(Some(Arc::new(self.data_store.clone())))
                 .with_provider_manager(Some(self.provider_manager)),

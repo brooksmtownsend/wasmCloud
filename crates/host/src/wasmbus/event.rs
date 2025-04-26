@@ -278,10 +278,6 @@ pub trait EventPublisher: Send + Sync {
 
 /// A default implementation of the EventPublisher trait that does nothing.
 /// This is useful for testing or when no event publishing is required.
+#[derive(Default)]
 pub struct DefaultEventPublisher {}
 impl EventPublisher for DefaultEventPublisher {}
-impl DefaultEventPublisher {
-    pub fn new() -> Self {
-        DefaultEventPublisher {}
-    }
-}

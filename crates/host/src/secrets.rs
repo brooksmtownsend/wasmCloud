@@ -25,11 +25,6 @@ pub trait SecretsManager: Send + Sync {
 }
 
 /// A default implementation of the SecretsManager trait that has no secrets.
+#[derive(Default)]
 pub struct DefaultSecretsManager {}
 impl SecretsManager for DefaultSecretsManager {}
-impl DefaultSecretsManager {
-    /// Create a new default secrets manager.
-    pub fn new() -> Self {
-        DefaultSecretsManager {}
-    }
-}

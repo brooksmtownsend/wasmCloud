@@ -891,25 +891,27 @@ impl HostBuilder {
             // Extension traits that we fallback to defaults for
             event_publisher: self
                 .event_publisher
-                .unwrap_or_else(|| Arc::new(DefaultEventPublisher::new())),
+                .unwrap_or_else(|| Arc::new(DefaultEventPublisher::default())),
             policy_manager: self
                 .policy_manager
-                .unwrap_or_else(|| Arc::new(DefaultPolicyManager::new())),
+                .unwrap_or_else(|| Arc::new(DefaultPolicyManager::default())),
             secrets_manager: self
                 .secrets_manager
-                .unwrap_or_else(|| Arc::new(DefaultSecretsManager::new())),
+                .unwrap_or_else(|| Arc::new(DefaultSecretsManager::default())),
             data_store: self
                 .data_store
-                .unwrap_or_else(|| Arc::new(DefaultStore::new())),
+                .unwrap_or_else(|| Arc::new(DefaultStore::default())),
             config_store: self
                 .config_store
-                .unwrap_or_else(|| Arc::new(DefaultStore::new())),
+                .unwrap_or_else(|| Arc::new(DefaultStore::default())),
             // TODO(brooksmtownsend): We should actually get the real config bundle generator once it's traitified
             config_generator: self
                 .bundle_generator
-                .unwrap_or_else(|| BundleGenerator::new(Arc::new(DefaultStore::new()))),
+                .unwrap_or_else(|| BundleGenerator::new(Arc::new(DefaultStore::default()))),
             // TODO(brooksmtownsend): what's the default? Only builtins?
-            provider_manager: self.provider_manager.unwrap(), // .unwrap_or_else(|| Arc::new(DefaultProviderManager::new())),
+            provider_manager: self
+                .provider_manager
+                .expect("only provider manager to be present"), // .unwrap_or_else(|| Arc::new(DefaultProviderManager::new())),
         };
 
         let host = Arc::new(host);
@@ -980,7 +982,7 @@ impl HostBuilder {
         Ok((Arc::clone(&host), async move {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
-            let _ = heartbeat.await.context("failed to await heartbeat")?;
+            heartbeat.await.context("failed to await heartbeat")?;
             host.event_publisher
                 .publish_event(
                     "host_stopped",
