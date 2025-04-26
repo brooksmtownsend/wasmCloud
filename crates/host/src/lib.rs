@@ -8,12 +8,15 @@
 //!
 //! ## Key Modules
 //!
-//! - **[`wasmbus`]**: This module contains the core implementation of the wasmCloud host functionality. It provides the [`Host`] struct and related configurations, which are central to running and managing Wasm components.
+//! - **[`event`]**: Provides the [`crate::event::EventPublisher`] trait for receiving and publishing events from the host.
+//! - **[`metrics`]**: Implements OpenTelemetry metrics for wasmCloud, primarily using [`wasmcloud_tracing`].
+//! - **[`nats`]**: Contains the NATS-based implementations for the wasmCloud host extension traits.
 //! - **[`oci`]**: Offers configuration and utilities for fetching OCI (Open Container Initiative) artifacts.
-//! - **[`policy`]**: Defines the [`PolicyManager`] trait for applying additional security policies on top of the wasmCloud host.
+//! - **[`policy`]**: Defines the [`crate::policy::PolicyManager`] trait for applying additional security policies on top of the wasmCloud host.
 //! - **[`registry`]**: Provides the [`crate::registry::RegistryCredentialExt`] extension trait for working with registry credentials.
 //! - **[`secrets`]**: Contains the [`crate::secrets::SecretsManager`] trait for securely fetching secrets from a secret store.
 //! - **[`store`]**: Defines the [`crate::store::StoreManager`] trait for managing configuration and data from a backing store.
+//! - **[`wasmbus`]**: This module contains the core implementation of the wasmCloud host functionality. It provides the [`Host`] struct and related configurations, which are central to running and managing Wasm components.
 //! - **[`workload_identity`]**: Experimental module for workload identity implementations.
 //!
 //! ## Extending the Host
@@ -31,9 +34,15 @@
 #![warn(missing_docs)]
 #![forbid(clippy::unwrap_used)]
 
-/// [crate::wasmbus::Host] implementation and [crate::wasmbus::nats] implementations for the
-/// wasmCloud host extension traits
-pub mod wasmbus;
+/// [crate::event::EventPublisher] trait for receiving and publishing events from the host
+pub mod event;
+
+/// NATS implementations of [crate::policy::PolicyManager], [crate::secrets::SecretsManager], and
+/// [crate::store::StoreManager] traits for the wasmCloud host.
+pub mod nats;
+
+/// Implementation of OpenTelemetry metrics for wasmCloud, primarily using [wasmcloud_tracing]
+pub(crate) mod metrics;
 
 /// Configuration for OCI artifact fetching [crate::oci::Config]
 pub mod oci;
@@ -52,8 +61,9 @@ pub mod secrets;
 /// [crate::store::StoreManager] trait for fetching configuration and data from a backing store
 pub mod store;
 
-/// Implementation of OpenTelemetry metrics for wasmCloud, primarily using [wasmcloud_tracing]
-pub(crate) mod metrics;
+/// [crate::wasmbus::Host] implementation and [crate::wasmbus::nats] implementations for the
+/// wasmCloud host extension traits
+pub mod wasmbus;
 
 /// experimental workload identity implementation
 pub mod workload_identity;
@@ -71,7 +81,7 @@ use tokio::fs;
 use tracing::{debug, instrument, warn};
 use url::Url;
 use wascap::jwt;
-use wasmcloud_core::{OciFetcher, RegistryAuth, RegistryConfig, RegistryType};
+use wasmcloud_core::{OciFetcher, RegistryConfig};
 
 #[derive(PartialEq)]
 enum ResourceRef<'a> {

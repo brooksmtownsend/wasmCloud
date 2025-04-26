@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::future::Either;
 use futures::stream::SelectAll;
 use futures::{Stream, StreamExt, TryFutureExt as _};
-use nkeys::KeyPair;
+use serde::Serialize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -16,7 +16,7 @@ use wasmcloud_control_interface::CtlResponse;
 use wasmcloud_core::CTL_API_VERSION_1;
 use wasmcloud_tracing::context::TraceContextInjector;
 
-use crate::wasmbus::{injector_to_headers, serialize_ctl_response};
+use crate::wasmbus::injector_to_headers;
 
 use super::store::data_watch;
 
@@ -39,11 +39,10 @@ impl Queue {
         nats: &async_nats::Client,
         topic_prefix: &str,
         lattice: &str,
-        host_key: &KeyPair,
+        host_id: &str,
         component_auction: bool,
         provider_auction: bool,
     ) -> anyhow::Result<Self> {
-        let host_id = host_key.public_key();
         let mut subs = vec![
             Either::Left(nats.subscribe(format!(
                 "{topic_prefix}.{CTL_API_VERSION_1}.{lattice}.registry.put",
@@ -311,8 +310,8 @@ impl NatsControlInterfaceServer {
         let queue = Queue::new(
             &self.ctl_nats,
             &self.ctl_topic_prefix,
-            &host.host_config.lattice,
-            &host.host_key,
+            host.lattice(),
+            &host.id(),
             self.enable_component_auction,
             self.enable_provider_auction,
         )
@@ -375,4 +374,11 @@ impl NatsControlInterfaceServer {
 
         Ok(tasks)
     }
+}
+
+/// Helper function to serialize `CtlResponse`<T> into a Vec<u8> if the response is Some
+fn serialize_ctl_response<T: Serialize>(
+    ctl_response: Option<CtlResponse<T>>,
+) -> Option<anyhow::Result<Vec<u8>>> {
+    ctl_response.map(|resp| serde_json::to_vec(&resp).map_err(anyhow::Error::from))
 }

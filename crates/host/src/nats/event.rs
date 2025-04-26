@@ -7,7 +7,7 @@ use tracing::{instrument, warn};
 use ulid::Ulid;
 use uuid::Uuid;
 
-use crate::wasmbus::event::EventPublisher;
+use crate::event::EventPublisher;
 
 /// NATS implementation of the wasmCloud [crate::wasmbus::event::EventPublisher] extension trait,
 /// sending events to the NATS message bus with a CloudEvents payload envelope.

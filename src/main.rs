@@ -14,14 +14,14 @@ use tokio::time::{timeout, timeout_at};
 use tokio::{select, signal};
 use tracing::{warn, Level as TracingLogLevel};
 use tracing_subscriber::util::SubscriberInitExt as _;
+use url::Url;
 use wasmcloud_core::logging::Level as WasmcloudLogLevel;
 use wasmcloud_core::{OtelConfig, OtelProtocol};
+use wasmcloud_host::nats::builder::NatsHostBuilder;
 use wasmcloud_host::oci::Config as OciConfig;
-use wasmcloud_host::url::Url;
-use wasmcloud_host::wasmbus::nats::builder::NatsHostBuilder;
-use wasmcloud_host::wasmbus::{nats::connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
 use wasmcloud_host::WasmbusHostConfig;
+use wasmcloud_host::{nats::connect_nats, wasmbus::Features};
 use wasmcloud_tracing::configure_observability;
 
 #[derive(Debug, Parser)]

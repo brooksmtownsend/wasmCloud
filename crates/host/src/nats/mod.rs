@@ -7,9 +7,9 @@ use async_nats::jetstream::kv::Store;
 use nkeys::KeyPair;
 use tracing::{info, instrument};
 
-use crate::workload_identity::WorkloadIdentityConfig;
-
-use super::setup_workload_identity_nats_connect_options;
+use crate::workload_identity::{
+    setup_workload_identity_nats_connect_options, WorkloadIdentityConfig,
+};
 
 /// Helper module for building a wasmCloud host with NATS as the primary transport.
 pub mod builder;

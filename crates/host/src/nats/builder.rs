@@ -6,24 +6,23 @@ use std::{
     time::Duration,
 };
 
-use anyhow::ensure;
+use anyhow::{ensure, Context as _};
 use async_nats::{jetstream::kv::Store, Client};
 use nkeys::KeyPair;
-use tracing::debug;
+use serde::Deserialize;
+use serde_json::json;
+use tracing::{debug, error, instrument};
+use wasmcloud_control_interface::RegistryCredential;
 use wasmcloud_core::RegistryConfig;
 
 use crate::{
+    event::EventPublisher,
+    nats::{event::NatsEventPublisher, policy::NatsPolicyManager, secrets::NatsSecretsManager},
     oci,
+    registry::{merge_registry_config, RegistryCredentialExt as _, SupplementalConfig},
     secrets::SecretsManager,
     store::StoreManager,
-    wasmbus::{
-        config::BundleGenerator,
-        event::EventPublisher,
-        load_supplemental_config, merge_registry_config,
-        nats::{event::NatsEventPublisher, policy::NatsPolicyManager, secrets::NatsSecretsManager},
-        providers::ProviderManager,
-        HostBuilder, SupplementalConfig,
-    },
+    wasmbus::{config::BundleGenerator, providers::ProviderManager, HostBuilder},
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
 };
 
@@ -202,5 +201,58 @@ impl NatsHostBuilder {
                 self.enable_provider_auction,
             ),
         ))
+    }
+}
+
+#[instrument(level = "debug", skip_all)]
+async fn load_supplemental_config(
+    ctl_nats: &async_nats::Client,
+    lattice: &str,
+    labels: &BTreeMap<String, String>,
+) -> anyhow::Result<SupplementalConfig> {
+    #[derive(Deserialize, Default)]
+    struct SerializedSupplementalConfig {
+        #[serde(default, rename = "registryCredentials")]
+        registry_credentials: Option<HashMap<String, RegistryCredential>>,
+    }
+
+    let cfg_topic = format!("wasmbus.cfg.{lattice}.req");
+    let cfg_payload = serde_json::to_vec(&json!({
+        "labels": labels,
+    }))
+    .context("failed to serialize config payload")?;
+
+    debug!("requesting supplemental config");
+    match ctl_nats.request(cfg_topic, cfg_payload.into()).await {
+        Ok(resp) => {
+            match serde_json::from_slice::<SerializedSupplementalConfig>(resp.payload.as_ref()) {
+                Ok(ser_cfg) => Ok(SupplementalConfig {
+                    registry_config: ser_cfg.registry_credentials.and_then(|creds| {
+                        creds
+                            .into_iter()
+                            .map(|(k, v)| {
+                                debug!(registry_url = %k, "set registry config");
+                                v.into_registry_config().map(|v| (k, v))
+                            })
+                            .collect::<anyhow::Result<_>>()
+                            .ok()
+                    }),
+                }),
+                Err(e) => {
+                    error!(
+                        ?e,
+                        "failed to deserialize supplemental config. Defaulting to empty config"
+                    );
+                    Ok(SupplementalConfig::default())
+                }
+            }
+        }
+        Err(e) => {
+            error!(
+                ?e,
+                "failed to request supplemental config. Defaulting to empty config"
+            );
+            Ok(SupplementalConfig::default())
+        }
     }
 }

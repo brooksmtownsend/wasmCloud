@@ -2,7 +2,6 @@
 
 use core::sync::atomic::Ordering;
 
-use std::collections::hash_map::Entry;
 use std::collections::{hash_map, BTreeMap, HashMap};
 use std::env::consts::{ARCH, FAMILY, OS};
 use std::future::Future;
@@ -18,15 +17,12 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, ensure, Context as _};
 use bytes::{BufMut, Bytes, BytesMut};
 use claims::{Claims, StoredClaims};
-use event::{DefaultEventPublisher, EventPublisher};
 use futures::stream::{AbortHandle, Abortable};
 use futures::{join, stream, Stream, StreamExt, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use nats::connect_nats;
 use nkeys::{KeyPair, KeyPairType, XKey};
 use providers::{Provider, ProviderManager};
 use secrecy::SecretBox;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::System;
 use tokio::io::AsyncWrite;
@@ -54,23 +50,23 @@ use wasmcloud_secrets_types::SECRET_PREFIX;
 use wasmcloud_tracing::context::TraceContextInjector;
 use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 
+use crate::event::{DefaultEventPublisher, EventPublisher};
+use crate::nats::connect_nats;
 use crate::policy::DefaultPolicyManager;
-use crate::registry::RegistryCredentialExt;
 use crate::secrets::{DefaultSecretsManager, SecretsManager};
 use crate::store::{DefaultStore, StoreManager};
 use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
-    fetch_component, HostMetrics, OciConfig, PolicyManager, PolicyResponse, RegistryAuth,
-    RegistryConfig, RegistryType, ResourceRef,
+    fetch_component, HostMetrics, PolicyManager, PolicyResponse, RegistryConfig, ResourceRef,
 };
 
 mod claims;
-mod event;
 mod experimental;
 mod handler;
 mod jetstream;
-mod providers;
+
+pub(crate) mod providers;
 
 /// Control interface implementation
 pub mod ctl;
@@ -80,7 +76,6 @@ pub mod config;
 
 /// wasmCloud host configuration
 pub mod host_config;
-pub mod nats;
 
 pub use self::experimental::Features;
 pub use self::host_config::Host as HostConfig;
@@ -381,188 +376,6 @@ pub struct Host {
     /// A set of tasks managed by the host.
     #[allow(unused)]
     tasks: JoinSet<()>,
-}
-
-#[cfg(unix)]
-async fn setup_workload_identity_nats_connect_options(
-    jwt: Option<&String>,
-    key: Option<Arc<KeyPair>>,
-    wid_cfg: WorkloadIdentityConfig,
-) -> anyhow::Result<async_nats::ConnectOptions> {
-    let wid_cfg = Arc::new(wid_cfg);
-    let jwt = jwt.map(String::to_string).map(Arc::new);
-    let key = key.clone();
-
-    // Return an auth callback that'll get called any time the
-    // NATS connection needs to be (re-)established. This is
-    // necessary to ensure that we always provide a recently
-    // issued JWT-SVID.
-    Ok(async_nats::ConnectOptions::with_auth_callback(
-        move |nonce| {
-            let key = key.clone();
-            let jwt = jwt.clone();
-            let wid_cfg = wid_cfg.clone();
-
-            let fetch_svid_handle = tokio::spawn(async move {
-                let mut client = spiffe::WorkloadApiClient::default()
-                    .await
-                    .map_err(async_nats::AuthError::new)?;
-                client
-                    .fetch_jwt_svid(&[wid_cfg.auth_service_audience.as_str()], None)
-                    .await
-                    .map_err(async_nats::AuthError::new)
-            });
-
-            async move {
-                let svid = fetch_svid_handle
-                    .await
-                    .map_err(async_nats::AuthError::new)?
-                    .map_err(async_nats::AuthError::new)?;
-
-                let mut auth = async_nats::Auth::new();
-                if let Some(key) = key {
-                    let signature = key.sign(&nonce).map_err(async_nats::AuthError::new)?;
-                    auth.signature = Some(signature);
-                }
-                if let Some(jwt) = jwt {
-                    auth.jwt = Some(jwt.to_string());
-                }
-                auth.token = Some(svid.token().into());
-                Ok(auth)
-            }
-        },
-    ))
-}
-
-#[cfg(target_family = "windows")]
-async fn setup_workload_identity_nats_connect_options(
-    jwt: Option<&String>,
-    key: Option<Arc<KeyPair>>,
-    wid_cfg: WorkloadIdentityConfig,
-) -> anyhow::Result<async_nats::ConnectOptions> {
-    bail!("workload identity is not supported on Windows")
-}
-
-#[derive(Debug, Default)]
-struct SupplementalConfig {
-    registry_config: Option<HashMap<String, RegistryConfig>>,
-}
-
-#[instrument(level = "debug", skip_all)]
-async fn load_supplemental_config(
-    ctl_nats: &async_nats::Client,
-    lattice: &str,
-    labels: &BTreeMap<String, String>,
-) -> anyhow::Result<SupplementalConfig> {
-    #[derive(Deserialize, Default)]
-    struct SerializedSupplementalConfig {
-        #[serde(default, rename = "registryCredentials")]
-        registry_credentials: Option<HashMap<String, RegistryCredential>>,
-    }
-
-    let cfg_topic = format!("wasmbus.cfg.{lattice}.req");
-    let cfg_payload = serde_json::to_vec(&json!({
-        "labels": labels,
-    }))
-    .context("failed to serialize config payload")?;
-
-    debug!("requesting supplemental config");
-    match ctl_nats.request(cfg_topic, cfg_payload.into()).await {
-        Ok(resp) => {
-            match serde_json::from_slice::<SerializedSupplementalConfig>(resp.payload.as_ref()) {
-                Ok(ser_cfg) => Ok(SupplementalConfig {
-                    registry_config: ser_cfg.registry_credentials.and_then(|creds| {
-                        creds
-                            .into_iter()
-                            .map(|(k, v)| {
-                                debug!(registry_url = %k, "set registry config");
-                                v.into_registry_config().map(|v| (k, v))
-                            })
-                            .collect::<anyhow::Result<_>>()
-                            .ok()
-                    }),
-                }),
-                Err(e) => {
-                    error!(
-                        ?e,
-                        "failed to deserialize supplemental config. Defaulting to empty config"
-                    );
-                    Ok(SupplementalConfig::default())
-                }
-            }
-        }
-        Err(e) => {
-            error!(
-                ?e,
-                "failed to request supplemental config. Defaulting to empty config"
-            );
-            Ok(SupplementalConfig::default())
-        }
-    }
-}
-
-#[instrument(level = "debug", skip_all)]
-async fn merge_registry_config(
-    registry_config: &mut HashMap<String, RegistryConfig>,
-    oci_opts: OciConfig,
-) {
-    // let mut registry_config = registry_config.write().await;
-    let allow_latest = oci_opts.allow_latest;
-    let additional_ca_paths = oci_opts.additional_ca_paths;
-
-    // update auth for specific registry, if provided
-    if let Some(reg) = oci_opts.oci_registry {
-        match registry_config.entry(reg.clone()) {
-            Entry::Occupied(_entry) => {
-                // note we don't update config here, since the config service should take priority
-                warn!(oci_registry_url = %reg, "ignoring OCI registry config, overridden by config service");
-            }
-            Entry::Vacant(entry) => {
-                debug!(oci_registry_url = %reg, "set registry config");
-                entry.insert(
-                    RegistryConfig::builder()
-                        .reg_type(RegistryType::Oci)
-                        .auth(RegistryAuth::from((
-                            oci_opts.oci_user,
-                            oci_opts.oci_password,
-                        )))
-                        .build()
-                        .expect("failed to build registry config"),
-                );
-            }
-        }
-    }
-
-    // update or create entry for all registries in allowed_insecure
-    oci_opts.allowed_insecure.into_iter().for_each(|reg| {
-        match registry_config.entry(reg.clone()) {
-            Entry::Occupied(mut entry) => {
-                debug!(oci_registry_url = %reg, "set allowed_insecure");
-                entry.get_mut().set_allow_insecure(true);
-            }
-            Entry::Vacant(entry) => {
-                debug!(oci_registry_url = %reg, "set allowed_insecure");
-                entry.insert(
-                    RegistryConfig::builder()
-                        .reg_type(RegistryType::Oci)
-                        .allow_insecure(true)
-                        .build()
-                        .expect("failed to build registry config"),
-                );
-            }
-        }
-    });
-
-    // update allow_latest for all registries
-    registry_config.iter_mut().for_each(|(url, config)| {
-        if !additional_ca_paths.is_empty() {
-            config.set_additional_ca_paths(additional_ca_paths.clone());
-        }
-        if allow_latest {
-            debug!(oci_registry_url = %url, "set allow_latest");
-        }
-        config.set_allow_latest(allow_latest);
-    });
 }
 
 /// HostBuilder is used to construct a new Host instance
@@ -891,7 +704,7 @@ impl HostBuilder {
                 .unwrap_or_else(|| Arc::new(DefaultEventPublisher::default())),
             policy_manager: self
                 .policy_manager
-                .unwrap_or_else(|| Arc::new(DefaultPolicyManager::default())),
+                .unwrap_or_else(|| Arc::new(DefaultPolicyManager)),
             secrets_manager: self
                 .secrets_manager
                 .unwrap_or_else(|| Arc::new(DefaultSecretsManager::default())),
@@ -1030,6 +843,18 @@ impl Host {
             .await
             .context("failed to wait for stop")?;
         Ok(*self.stop_rx.borrow())
+    }
+
+    /// Returns the host's unique identifier
+    #[instrument(level = "trace", skip_all)]
+    pub fn id(&self) -> String {
+        self.host_key.public_key()
+    }
+
+    /// Returns the lattice the host is running on
+    #[instrument(level = "trace", skip_all)]
+    pub fn lattice(&self) -> &str {
+        &self.host_config.lattice
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -1339,7 +1164,7 @@ impl Host {
         self.event_publisher
             .publish_event(
                 "component_scaled",
-                event::component_scaled(
+                crate::event::component_scaled(
                     claims.as_ref(),
                     annotations,
                     self.host_key.public_key(),
@@ -1386,7 +1211,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_auction_component(
+    pub(crate) async fn handle_auction_component(
         &self,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<Option<CtlResponse<ComponentAuctionAck>>> {
@@ -1396,7 +1221,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_auction_provider(
+    pub(crate) async fn handle_auction_provider(
         &self,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<Option<CtlResponse<ProviderAuctionAck>>> {
@@ -1406,7 +1231,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_stop_host(
+    pub(crate) async fn handle_stop_host(
         &self,
         payload: impl AsRef<[u8]>,
         transport_host_id: &str,
@@ -1452,7 +1277,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_scale_component(
+    pub(crate) async fn handle_scale_component(
         self: Arc<Self>,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<CtlResponse<()>> {
@@ -1512,7 +1337,7 @@ impl Host {
         ) {
             // No component is running and we requested to scale to zero, noop.
             // We still publish the event to indicate that the component has been scaled to zero
-            (hash_map::Entry::Vacant(_), None) => event::component_scaled(
+            (hash_map::Entry::Vacant(_), None) => crate::event::component_scaled(
                 claims.as_ref(),
                 annotations,
                 host_id,
@@ -1544,7 +1369,7 @@ impl Host {
                         )
                         .await?;
 
-                        event::component_scaled(
+                        crate::event::component_scaled(
                             claims.as_ref(),
                             annotations,
                             host_id,
@@ -1559,7 +1384,7 @@ impl Host {
                             .event_publisher
                             .publish_event(
                                 "component_scale_failed",
-                                event::component_scale_failed(
+                                crate::event::component_scale_failed(
                                     claims_token.map(|c| c.claims.clone()).as_ref(),
                                     annotations,
                                     host_id,
@@ -1585,7 +1410,7 @@ impl Host {
                     .context("failed to stop component in response to scale to zero")?;
 
                 info!(?component_ref, "component stopped");
-                event::component_scaled(
+                crate::event::component_scaled(
                     claims.as_ref(),
                     &component.annotations,
                     host_id,
@@ -1602,7 +1427,7 @@ impl Host {
 
                 // Create the event first to avoid borrowing the component
                 // This event is idempotent.
-                let event = event::component_scaled(
+                let event = crate::event::component_scaled(
                     claims.as_ref(),
                     &component.annotations,
                     host_id,
@@ -1661,7 +1486,7 @@ impl Host {
     // design thinking around how update component should work. Should it be limited to a single host or latticewide?
     // Should it also update configuration, or is that separate? Should scaling be done via an update?
     #[instrument(level = "debug", skip_all)]
-    async fn handle_update_component(
+    pub(crate) async fn handle_update_component(
         self: Arc<Self>,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<CtlResponse<()>> {
@@ -1721,7 +1546,7 @@ impl Host {
             self.event_publisher
                 .publish_event(
                     "component_scaled",
-                    event::component_scaled(
+                    crate::event::component_scaled(
                         new_claims.as_ref(),
                         &component.annotations,
                         host_id,
@@ -1739,7 +1564,7 @@ impl Host {
             self.event_publisher
                 .publish_event(
                     "component_scaled",
-                    event::component_scaled(
+                    crate::event::component_scaled(
                         component.claims(),
                         &component.annotations,
                         host_id,
@@ -1761,7 +1586,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_start_provider(
+    pub(crate) async fn handle_start_provider(
         self: Arc<Self>,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<Option<CtlResponse<()>>> {
@@ -1899,7 +1724,7 @@ impl Host {
             self.event_publisher
                 .publish_event(
                     "provider_started",
-                    event::provider_started(
+                    crate::event::provider_started(
                         claims.as_ref(),
                         &annotations,
                         host_id,
@@ -1926,7 +1751,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_stop_provider(
+    pub(crate) async fn handle_stop_provider(
         &self,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<CtlResponse<()>> {
@@ -1936,27 +1761,29 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_inventory(&self) -> anyhow::Result<CtlResponse<HostInventory>> {
+    pub(crate) async fn handle_inventory(&self) -> anyhow::Result<CtlResponse<HostInventory>> {
         <Self as ControlInterfaceServer>::handle_inventory(self).await
     }
 
     #[instrument(level = "trace", skip_all)]
-    async fn handle_claims(&self) -> anyhow::Result<CtlResponse<Vec<HashMap<String, String>>>> {
+    pub(crate) async fn handle_claims(
+        &self,
+    ) -> anyhow::Result<CtlResponse<Vec<HashMap<String, String>>>> {
         <Self as ControlInterfaceServer>::handle_claims(self).await
     }
 
     #[instrument(level = "trace", skip_all)]
-    async fn handle_links(&self) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn handle_links(&self) -> anyhow::Result<Vec<u8>> {
         <Self as ControlInterfaceServer>::handle_links(self).await
     }
 
     #[instrument(level = "trace", skip(self))]
-    async fn handle_config_get(&self, config_name: &str) -> anyhow::Result<Vec<u8>> {
+    pub(crate) async fn handle_config_get(&self, config_name: &str) -> anyhow::Result<Vec<u8>> {
         <Self as ControlInterfaceServer>::handle_config_get(self, config_name).await
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_label_put(
+    pub(crate) async fn handle_label_put(
         &self,
         host_id: &str,
         payload: impl AsRef<[u8]>,
@@ -1967,7 +1794,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_label_del(
+    pub(crate) async fn handle_label_del(
         &self,
         host_id: &str,
         payload: impl AsRef<[u8]>,
@@ -1981,7 +1808,10 @@ impl Host {
     /// the change is written to the LATTICEDATA store, each host in the lattice (including this one)
     /// will handle the new specification and update their own internal link maps via [process_component_spec_put].
     #[instrument(level = "debug", skip_all)]
-    async fn handle_link_put(&self, payload: impl AsRef<[u8]>) -> anyhow::Result<CtlResponse<()>> {
+    pub(crate) async fn handle_link_put(
+        &self,
+        payload: impl AsRef<[u8]>,
+    ) -> anyhow::Result<CtlResponse<()>> {
         let link: Link = serde_json::from_slice(payload.as_ref())
             .context("failed to deserialize wrpc link definition")?;
         <Self as ControlInterfaceServer>::handle_link_put(self, link).await
@@ -1989,14 +1819,17 @@ impl Host {
 
     #[instrument(level = "debug", skip_all)]
     /// Remove an interface link on a source component for a specific package
-    async fn handle_link_del(&self, payload: impl AsRef<[u8]>) -> anyhow::Result<CtlResponse<()>> {
+    pub(crate) async fn handle_link_del(
+        &self,
+        payload: impl AsRef<[u8]>,
+    ) -> anyhow::Result<CtlResponse<()>> {
         let req = serde_json::from_slice::<DeleteInterfaceLinkDefinitionRequest>(payload.as_ref())
             .context("failed to deserialize wrpc link definition")?;
         <Self as ControlInterfaceServer>::handle_link_del(self, req).await
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_registries_put(
+    pub(crate) async fn handle_registries_put(
         &self,
         payload: impl AsRef<[u8]>,
     ) -> anyhow::Result<CtlResponse<()>> {
@@ -2007,7 +1840,7 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all, fields(%config_name))]
-    async fn handle_config_put(
+    pub(crate) async fn handle_config_put(
         &self,
         config_name: &str,
         data: Bytes,
@@ -2019,12 +1852,15 @@ impl Host {
     }
 
     #[instrument(level = "debug", skip_all, fields(%config_name))]
-    async fn handle_config_delete(&self, config_name: &str) -> anyhow::Result<CtlResponse<()>> {
+    pub(crate) async fn handle_config_delete(
+        &self,
+        config_name: &str,
+    ) -> anyhow::Result<CtlResponse<()>> {
         <Self as ControlInterfaceServer>::handle_config_delete(self, config_name).await
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn handle_ping_hosts(
+    pub(crate) async fn handle_ping_hosts(
         &self,
     ) -> anyhow::Result<CtlResponse<wasmcloud_control_interface::Host>> {
         <Self as ControlInterfaceServer>::handle_ping_hosts(self).await
@@ -2323,13 +2159,6 @@ fn component_import_links(links: &[Link]) -> HashMap<Box<str>, HashMap<Box<str>,
         }
     }
     m
-}
-
-/// Helper function to serialize `CtlResponse`<T> into a Vec<u8> if the response is Some
-fn serialize_ctl_response<T: Serialize>(
-    ctl_response: Option<CtlResponse<T>>,
-) -> Option<anyhow::Result<Vec<u8>>> {
-    ctl_response.map(|resp| serde_json::to_vec(&resp).map_err(anyhow::Error::from))
 }
 
 fn human_friendly_uptime(uptime: Duration) -> String {

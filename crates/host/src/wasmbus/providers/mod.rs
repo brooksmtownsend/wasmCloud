@@ -28,11 +28,11 @@ use wasmcloud_core::{provider_config_update_subject, HealthCheckResponse, HostDa
 use wasmcloud_runtime::capability::secrets::store::SecretValue;
 use wasmcloud_tracing::context::TraceContextInjector;
 
+use crate::event::EventPublisher;
 use crate::jwt;
+use crate::wasmbus::injector_to_headers;
 use crate::wasmbus::{config::ConfigBundle, Annotations};
-use crate::wasmbus::{event, injector_to_headers};
 
-use super::event::EventPublisher;
 use super::Host;
 
 mod http_server;
@@ -474,7 +474,7 @@ fn check_health(
                         if let Err(e) = event_publisher
                             .publish_event(
                                 "health_check_passed",
-                                event::provider_health_check(&host_id, &provider_id),
+                                crate::event::provider_health_check(&host_id, &provider_id),
                             )
                             .await
                         {
@@ -491,7 +491,7 @@ fn check_health(
                         if let Err(e) = event_publisher
                             .publish_event(
                                 "health_check_failed",
-                                event::provider_health_check(&host_id, &provider_id),
+                                crate::event::provider_health_check(&host_id, &provider_id),
                             )
                             .await
                         {
@@ -507,7 +507,7 @@ fn check_health(
                         if let Err(e) = event_publisher
                             .publish_event(
                                 "health_check_status",
-                                event::provider_health_check(&host_id, &provider_id),
+                                crate::event::provider_health_check(&host_id, &provider_id),
                             )
                             .await
                         {

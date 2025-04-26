@@ -22,8 +22,7 @@ use wasmcloud_tracing::context::TraceContextInjector;
 
 use crate::registry::RegistryCredentialExt;
 use crate::wasmbus::{
-    event, human_friendly_uptime, injector_to_headers, Annotations, Claims, Host, Provider,
-    StoredClaims,
+    human_friendly_uptime, injector_to_headers, Annotations, Claims, Host, Provider, StoredClaims,
 };
 use crate::ResourceRef;
 
@@ -322,7 +321,7 @@ impl ControlInterfaceServer for Host {
                         .event_publisher
                         .publish_event(
                             "component_scale_failed",
-                            event::component_scale_failed(
+                            crate::event::component_scale_failed(
                                 None,
                                 &annotations,
                                 host_id,
@@ -361,7 +360,7 @@ impl ControlInterfaceServer for Host {
                     .event_publisher
                     .publish_event(
                         "component_scale_failed",
-                        event::component_scale_failed(
+                        crate::event::component_scale_failed(
                             claims_token.map(|c| c.claims).as_ref(),
                             &annotations,
                             host_id,
@@ -527,7 +526,12 @@ impl ControlInterfaceServer for Host {
                     .event_publisher
                     .publish_event(
                         "provider_start_failed",
-                        event::provider_start_failed(provider_ref, provider_id, host_id, &err),
+                        crate::event::provider_start_failed(
+                            provider_ref,
+                            provider_id,
+                            host_id,
+                            &err,
+                        ),
                     )
                     .await
                 {
@@ -606,7 +610,7 @@ impl ControlInterfaceServer for Host {
         self.event_publisher
             .publish_event(
                 "provider_stopped",
-                event::provider_stopped(annotations, host_id, provider_id, "stop"),
+                crate::event::provider_stopped(annotations, host_id, provider_id, "stop"),
             )
             .await?;
         Ok(CtlResponse::<()>::success(
@@ -676,7 +680,7 @@ impl ControlInterfaceServer for Host {
             .context("Unable to delete config data")?;
 
         self.event_publisher
-            .publish_event("config_deleted", event::config_deleted(config_name))
+            .publish_event("config_deleted", crate::event::config_deleted(config_name))
             .await?;
 
         Ok(CtlResponse::<()>::success(
@@ -711,7 +715,7 @@ impl ControlInterfaceServer for Host {
         self.event_publisher
             .publish_event(
                 "labels_changed",
-                event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
+                crate::event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
             )
             .await
             .context("failed to publish labels_changed event")?;
@@ -740,7 +744,7 @@ impl ControlInterfaceServer for Host {
         self.event_publisher
             .publish_event(
                 "labels_changed",
-                event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
+                crate::event::labels_changed(host_id, HashMap::from_iter(labels.clone())),
             )
             .await
             .context("failed to publish labels_changed event")?;
@@ -840,13 +844,13 @@ impl ControlInterfaceServer for Host {
             self.event_publisher
                 .publish_event(
                     "linkdef_set_failed",
-                    event::linkdef_set_failed(&request, &e),
+                    crate::event::linkdef_set_failed(&request, &e),
                 )
                 .await?;
             Ok(CtlResponse::error(e.to_string().as_ref()))
         } else {
             self.event_publisher
-                .publish_event("linkdef_set", event::linkdef_set(&request))
+                .publish_event("linkdef_set", crate::event::linkdef_set(&request))
                 .await?;
             Ok(CtlResponse::<()>::success("successfully set link".into()))
         }
@@ -912,7 +916,7 @@ impl ControlInterfaceServer for Host {
         self.event_publisher
             .publish_event(
                 "linkdef_deleted",
-                event::linkdef_deleted(
+                crate::event::linkdef_deleted(
                     source_id,
                     deleted_link_target.as_ref(),
                     link_name,
@@ -974,7 +978,7 @@ impl ControlInterfaceServer for Host {
         // We don't write it into the cached data and instead let the caching thread handle it as we
         // won't need it immediately.
         self.event_publisher
-            .publish_event("config_set", event::config_set(config_name))
+            .publish_event("config_set", crate::event::config_set(config_name))
             .await?;
 
         Ok(CtlResponse::<()>::success("successfully put config".into()))

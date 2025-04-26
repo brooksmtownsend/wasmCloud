@@ -12,8 +12,8 @@ use tokio::task::JoinSet;
 use url::Url;
 
 use wasmcloud_control_interface::{Client as WasmcloudCtlClient, ClientBuilder};
+use wasmcloud_host::nats::connect_nats;
 use wasmcloud_host::wasmbus::host_config::PolicyService;
-use wasmcloud_host::wasmbus::nats::connect_nats;
 use wasmcloud_host::wasmbus::{Features, Host, HostConfig};
 
 /// Add a host label, and ensure that it has been added
@@ -118,7 +118,7 @@ impl WasmCloudTestHost {
             .await
             .context("failed to connect to NATS")?;
 
-        let nats_builder = wasmcloud_host::wasmbus::nats::builder::NatsHostBuilder::new(
+        let nats_builder = wasmcloud_host::nats::builder::NatsHostBuilder::new(
             nats_client.clone(),
             nats_client,
             None,
