@@ -1,6 +1,7 @@
 //! The NATS implementation of the control interface.
 
 use anyhow::Context as _;
+use async_nats::jetstream::kv::Store;
 use bytes::Bytes;
 use futures::future::Either;
 use futures::stream::SelectAll;
@@ -16,6 +17,8 @@ use wasmcloud_core::CTL_API_VERSION_1;
 use wasmcloud_tracing::context::TraceContextInjector;
 
 use crate::wasmbus::{injector_to_headers, serialize_ctl_response};
+
+use super::store::data_watch;
 
 #[derive(Debug)]
 pub(crate) struct Queue {
@@ -263,22 +266,35 @@ impl crate::wasmbus::Host {
     }
 }
 
+/// A control interface server that receives messages on the NATS message bus and
+/// dispatches them to the host for processing.
 pub struct NatsControlInterfaceServer {
     ctl_nats: Arc<async_nats::Client>,
+    data_store: Store,
     ctl_topic_prefix: String,
     enable_component_auction: bool,
     enable_provider_auction: bool,
 }
 
 impl NatsControlInterfaceServer {
+    /// Create a new NATS control interface server.
+    ///
+    /// # Arguments
+    /// * `ctl_nats` - The NATS client to use for sending and receiving messages.
+    /// * `data_store` - The JetStream KV bucket where ComponentSpecs are stored.
+    /// * `ctl_topic_prefix` - The topic prefix to use for control interface messages.
+    /// * `enable_component_auction` - Whether to enable component auctioning.
+    /// * `enable_provider_auction` - Whether to enable provider auctioning.
     pub fn new(
         ctl_nats: async_nats::Client,
+        data_store: Store,
         ctl_topic_prefix: String,
         enable_component_auction: bool,
         enable_provider_auction: bool,
     ) -> Self {
         Self {
             ctl_nats: Arc::new(ctl_nats),
+            data_store,
             ctl_topic_prefix,
             enable_component_auction,
             enable_provider_auction,
@@ -286,7 +302,12 @@ impl NatsControlInterfaceServer {
     }
 
     #[instrument(level = "trace", skip_all)]
-    pub async fn start(&self, host: Arc<crate::wasmbus::Host>) -> anyhow::Result<JoinSet<()>> {
+    /// Start the control interface server, returning a JoinSet of tasks.
+    /// This will start the NATS subscriber and the data watch tasks.
+    pub async fn start(
+        self,
+        host: Arc<crate::wasmbus::Host>,
+    ) -> anyhow::Result<JoinSet<anyhow::Result<()>>> {
         let queue = Queue::new(
             &self.ctl_nats,
             &self.ctl_topic_prefix,
@@ -299,6 +320,10 @@ impl NatsControlInterfaceServer {
         .context("failed to initialize queue")?;
 
         let mut tasks = JoinSet::new();
+        data_watch(&mut tasks, self.data_store, host.clone())
+            .await
+            .context("failed to start data watch")?;
+
         tasks.spawn({
             let ctl_nats = Arc::clone(&self.ctl_nats);
             let host = Arc::clone(&host);
@@ -344,6 +369,7 @@ impl NatsControlInterfaceServer {
 
                 let deadline = { *host.stop_rx.borrow() };
                 host.stop_tx.send_replace(deadline);
+                Ok(())
             }
         });
 

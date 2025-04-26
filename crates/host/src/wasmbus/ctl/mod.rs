@@ -229,12 +229,11 @@ impl ControlInterfaceServer for Host {
         info!(?timeout, "handling stop host");
 
         self.ready.store(false, Ordering::Relaxed);
-
         self.heartbeat.abort();
-        self.data_watch.abort();
         let deadline =
             timeout.and_then(|timeout| Instant::now().checked_add(Duration::from_millis(timeout)));
         self.stop_tx.send_replace(deadline);
+
         Ok(CtlResponse::<()>::success(
             "successfully handled stop host".into(),
         ))

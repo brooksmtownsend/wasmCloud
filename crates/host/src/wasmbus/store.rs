@@ -24,6 +24,7 @@ pub struct DefaultStore {
 }
 
 impl DefaultStore {
+    /// Creates a new instance of DefaultStore with an empty HashMap.
     pub fn new() -> Self {
         Self {
             store: RwLock::new(HashMap::new()),

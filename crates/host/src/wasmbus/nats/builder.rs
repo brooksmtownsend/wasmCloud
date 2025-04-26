@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::ensure;
-use async_nats::Client;
+use async_nats::{jetstream::kv::Store, Client};
 use nkeys::KeyPair;
 use wasmcloud_core::RegistryConfig;
 
@@ -28,6 +28,13 @@ use crate::{
 
 use super::ctl::NatsControlInterfaceServer;
 
+/// Opinionated [crate::wasmbus::HostBuilder] that uses NATS as the primary transport and implementations
+/// for the [crate::wasmbus::Host] extension traits.
+///
+/// This builder is used to create a [crate::wasmbus::HostBuilder] and a [NatsControlInterfaceServer] for
+/// listening for control messages on the NATS message bus. Incoming messages will use the
+/// [crate::wasmbus::ctl::ControlInterfaceServer] trait to handle the messages and
+/// send them to the host.
 pub struct NatsHostBuilder {
     // Required fields
     ctl_nats: Client,
@@ -39,7 +46,7 @@ pub struct NatsHostBuilder {
 
     // Trait implementations for NATS
     config_store: Arc<dyn StoreManager>,
-    data_store: Arc<dyn StoreManager>,
+    data_store: Store,
     policy_manager: Option<Arc<dyn PolicyManager>>,
     secrets_manager: Option<Arc<dyn SecretsManager>>,
     event_publisher: Option<Arc<dyn EventPublisher>>,
@@ -65,7 +72,7 @@ impl NatsHostBuilder {
             async_nats::jetstream::new(ctl_nats.clone())
         };
         let bucket = format!("LATTICEDATA_{}", lattice);
-        let data = create_bucket(&ctl_jetstream, &bucket).await?;
+        let data_store = create_bucket(&ctl_jetstream, &bucket).await?;
 
         let config_bucket = format!("CONFIGDATA_{}", lattice);
         let config_data = create_bucket(&ctl_jetstream, &config_bucket).await?;
@@ -79,6 +86,7 @@ impl NatsHostBuilder {
         let mut registry_config = supplemental_config.registry_config.unwrap_or_default();
         merge_registry_config(&mut registry_config, oci_opts).await;
 
+        // TODO(brooksmtownsend): figure this out where go
         // let config_generator = BundleGenerator::new(config_data.clone());
 
         Ok(Self {
@@ -87,7 +95,7 @@ impl NatsHostBuilder {
             config_generator: None,
             registry_config,
             config_store: Arc::new(config_data),
-            data_store: Arc::new(data),
+            data_store,
             policy_manager: None,
             secrets_manager: None,
             event_publisher: None,
@@ -166,7 +174,7 @@ impl NatsHostBuilder {
         Ok((
             HostBuilder::from(config)
                 .with_config_store(Some(self.config_store))
-                .with_data_store(Some(self.data_store))
+                .with_data_store(Some(Arc::new(self.data_store.clone())))
                 .with_bundle_generator(self.config_generator)
                 .with_registry_config(self.registry_config)
                 .with_event_publisher(self.event_publisher)
@@ -174,6 +182,7 @@ impl NatsHostBuilder {
                 .with_secrets_manager(self.secrets_manager),
             NatsControlInterfaceServer::new(
                 self.ctl_nats,
+                self.data_store,
                 self.ctl_topic_prefix,
                 self.enable_component_auction,
                 self.enable_provider_auction,

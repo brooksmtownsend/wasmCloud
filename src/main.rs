@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 use clap::{ArgAction, Parser};
 use nkeys::KeyPair;
 use regex::Regex;
@@ -19,13 +19,9 @@ use wasmcloud_core::{OtelConfig, OtelProtocol};
 use wasmcloud_host::oci::Config as OciConfig;
 use wasmcloud_host::url::Url;
 use wasmcloud_host::wasmbus::nats::builder::NatsHostBuilder;
-use wasmcloud_host::wasmbus::nats::event::NatsEventPublisher;
-use wasmcloud_host::wasmbus::nats::secrets::NatsSecretsManager;
 use wasmcloud_host::wasmbus::{connect_nats, Features};
 use wasmcloud_host::workload_identity::WorkloadIdentityConfig;
-use wasmcloud_host::{
-    wasmbus::nats::policy::NatsPolicyManager, PolicyHostInfo, PolicyManager, WasmbusHostConfig,
-};
+use wasmcloud_host::WasmbusHostConfig;
 use wasmcloud_tracing::configure_observability;
 
 #[derive(Debug, Parser)]

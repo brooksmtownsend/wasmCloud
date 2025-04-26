@@ -270,6 +270,8 @@ impl BundleGenerator {
     }
 }
 
+//TODO(brooksmtownsend): Reinstate this
+#[allow(dead_code)]
 async fn watcher_loop(
     store: Store,
     name: String,

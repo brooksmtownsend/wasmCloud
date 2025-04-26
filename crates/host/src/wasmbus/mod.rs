@@ -16,15 +16,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure, Context as _};
-use async_nats::jetstream::kv::Store;
-use async_nats::Client;
 use bytes::{BufMut, Bytes, BytesMut};
 use claims::{Claims, StoredClaims};
 use event::{DefaultEventPublisher, EventPublisher};
 use futures::stream::{AbortHandle, Abortable};
-use futures::{join, stream, try_join, Stream, StreamExt, TryFutureExt as _, TryStreamExt};
+use futures::{join, stream, Stream, StreamExt, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use nats::secrets::NatsSecretsManager;
 use nkeys::{KeyPair, KeyPairType, XKey};
 use providers::Provider;
 use secrecy::SecretBox;
@@ -61,8 +58,6 @@ use crate::policy::DefaultPolicyManager;
 use crate::registry::RegistryCredentialExt;
 use crate::secrets::{DefaultSecretsManager, SecretsManager};
 use crate::wasmbus::ctl::ControlInterfaceServer;
-use crate::wasmbus::jetstream::create_bucket;
-use crate::wasmbus::nats::ctl::Queue;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{
     fetch_component, HostMetrics, OciConfig, PolicyManager, PolicyResponse, RegistryAuth,
@@ -359,9 +354,6 @@ pub struct Host {
 
     /// The NATS client used for making RPC calls.
     rpc_nats: Arc<async_nats::Client>,
-
-    /// Handle to abort the task watching for changes in the LATTICEDATA store.
-    data_watch: AbortHandle,
 
     /// Configured OpenTelemetry metrics for monitoring the host.
     metrics: Arc<HostMetrics>,
@@ -904,11 +896,7 @@ impl HostBuilder {
         }
 
         let (heartbeat_abort, heartbeat_abort_reg) = AbortHandle::new_pair();
-        let (data_watch_abort, data_watch_abort_reg) = AbortHandle::new_pair();
         let start_at = Instant::now();
-
-        let enable_component_auction = self.config.enable_component_auction;
-        let enable_provider_auction = self.config.enable_provider_auction;
 
         let host = Host {
             components: Arc::new(RwLock::new(HashMap::new())),
@@ -920,7 +908,6 @@ impl HostBuilder {
             secrets_xkey: Arc::new(XKey::new()),
             labels: Arc::new(RwLock::new(labels)),
             experimental_features: self.config.experimental_features,
-            data_watch: data_watch_abort.clone(),
             runtime,
             start_at,
             stop_rx,
@@ -1027,8 +1014,6 @@ impl HostBuilder {
         Ok((Arc::clone(&host), async move {
             ready.store(false, Ordering::Relaxed);
             heartbeat_abort.abort();
-            data_watch_abort.abort();
-            // TODO: consider giving the abstractions a way to return a handle
             let _ = heartbeat.await.context("failed to await heartbeat")?;
             host.event_publisher
                 .publish_event(
@@ -1041,7 +1026,6 @@ impl HostBuilder {
                 .context("failed to publish stop event")?;
             // Before we exit, make sure to flush all messages or we may lose some that we've
             // thought were sent (like the host_stopped event)
-            // TODO: flush ctl_nats when done with host
             host.rpc_nats
                 .flush()
                 .await
