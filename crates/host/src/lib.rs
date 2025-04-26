@@ -27,7 +27,7 @@
 //!
 //! ## Getting Started
 //!
-//! To get started with wasmCloud, refer to the [`wasmbus`] module for the core host functionality. From there, you can explore the other modules to add extensions and integrations as needed.
+//! To get started with wasmCloud, refer to [`wasmbus`] for the core host functionality. From there, you can explore the other modules to add extensions and integrations as needed.
 //!
 //! For more information, visit the [wasmCloud homepage](https://wasmcloud.com).
 
