@@ -38,13 +38,17 @@ use super::Host;
 mod http_server;
 mod messaging_nats;
 
+/// A trait for sending and receiving messages to/from a provider
 #[async_trait::async_trait]
 pub trait ProviderManager: Send + Sync {
+    /// Put a link to the provider
     async fn put_link(
         &self,
         link: &wasmcloud_core::InterfaceLinkDefinition,
         target: &str,
     ) -> anyhow::Result<()>;
+
+    /// Delete a link from the provider
     async fn delete_link(
         &self,
         link: &wasmcloud_core::InterfaceLinkDefinition,

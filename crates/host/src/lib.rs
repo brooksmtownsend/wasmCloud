@@ -42,7 +42,7 @@ pub mod event;
 pub mod nats;
 
 /// Implementation of OpenTelemetry metrics for wasmCloud, primarily using [wasmcloud_tracing]
-pub(crate) mod metrics;
+pub mod metrics;
 
 /// Configuration for OCI artifact fetching [crate::oci::Config]
 pub mod oci;
@@ -68,7 +68,6 @@ pub mod wasmbus;
 /// experimental workload identity implementation
 pub mod workload_identity;
 
-pub use metrics::HostMetrics;
 pub use oci::Config as OciConfig;
 pub use policy::{HostInfo as PolicyHostInfo, PolicyManager, Response as PolicyResponse};
 pub use wasmbus::{Host as WasmbusHost, HostConfig as WasmbusHostConfig};

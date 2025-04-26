@@ -21,7 +21,7 @@ use futures::stream::{AbortHandle, Abortable};
 use futures::{join, stream, Stream, StreamExt, TryStreamExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use nkeys::{KeyPair, KeyPairType, XKey};
-use providers::{Provider, ProviderManager};
+use providers::Provider;
 use secrecy::SecretBox;
 use serde_json::json;
 use sysinfo::System;
@@ -51,15 +51,14 @@ use wasmcloud_tracing::context::TraceContextInjector;
 use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 
 use crate::event::{DefaultEventPublisher, EventPublisher};
+use crate::metrics::HostMetrics;
 use crate::nats::connect_nats;
 use crate::policy::DefaultPolicyManager;
 use crate::secrets::{DefaultSecretsManager, SecretsManager};
 use crate::store::{DefaultStore, StoreManager};
 use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::workload_identity::WorkloadIdentityConfig;
-use crate::{
-    fetch_component, HostMetrics, PolicyManager, PolicyResponse, RegistryConfig, ResourceRef,
-};
+use crate::{fetch_component, PolicyManager, PolicyResponse, RegistryConfig, ResourceRef};
 
 mod claims;
 mod experimental;
@@ -80,6 +79,7 @@ pub mod host_config;
 pub use self::experimental::Features;
 pub use self::host_config::Host as HostConfig;
 pub use jetstream::ComponentSpecification;
+pub use providers::ProviderManager;
 
 use self::config::{BundleGenerator, ConfigBundle};
 use self::handler::Handler;
