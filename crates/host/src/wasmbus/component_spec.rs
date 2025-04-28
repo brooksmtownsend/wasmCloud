@@ -1,12 +1,11 @@
 //! Host interactions with JetStream, including processing of KV entries and
 //! storing/retrieving component specifications.
 
-use anyhow::{ensure, Context as _};
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, instrument, warn};
+use tracing::{error, instrument, warn};
 use wasmcloud_control_interface::Link;
 
-use crate::wasmbus::claims::{Claims, StoredClaims};
 use crate::wasmbus::component_import_links;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -82,17 +81,36 @@ impl super::Host {
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub(crate) async fn process_component_spec_put(
+    pub(crate) async fn delete_component_spec(&self, id: impl AsRef<str>) -> anyhow::Result<()> {
+        let id = id.as_ref();
+        let key = format!("COMPONENT_{id}");
+        self.data_store
+            .del(&key)
+            .await
+            .context("failed to delete component spec")?;
+        if self.components.read().await.get(id).is_some() {
+            warn!(
+                component_id = id,
+                "component spec deleted, but component is still running"
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    /// Update the component specification in the host map. This will also update the links in the
+    /// component handler if the component is already running. This will also send the new links to
+    /// any providers that are the source or target of the link.
+    ///
+    /// You must not be holding the following locks when calling this function:
+    /// - `self.links`
+    /// - `self.providers`
+    /// - `self.components`
+    pub(crate) async fn update_host_with_spec(
         &self,
         id: impl AsRef<str>,
-        value: impl AsRef<[u8]>,
+        spec: &ComponentSpecification,
     ) -> anyhow::Result<()> {
-        let id = id.as_ref();
-        debug!(id, "process component spec put");
-
-        let spec: ComponentSpecification = serde_json::from_slice(value.as_ref())
-            .context("failed to deserialize component specification")?;
-
         // Compute all new links that do not exist in the host map, which we'll use to
         // publish to any running providers that are the source or target of the link.
         // Computing this ahead of time is a tradeoff to hold only one lock at the cost of
@@ -140,85 +158,16 @@ impl super::Host {
         }
 
         // If the component is already running, update the links
-        if let Some(component) = self.components.write().await.get(id) {
+        if let Some(component) = self.components.write().await.get(id.as_ref()) {
             *component.handler.instance_links.write().await = component_import_links(&spec.links);
             // NOTE(brooksmtownsend): We can consider updating the component if the image URL changes
         };
 
         // Insert the links into host map
-        self.links.write().await.insert(id.to_string(), spec.links);
-
-        Ok(())
-    }
-
-    #[instrument(level = "debug", skip_all)]
-    pub(crate) async fn process_component_spec_delete(
-        &self,
-        id: impl AsRef<str>,
-    ) -> anyhow::Result<()> {
-        let id = id.as_ref();
-        debug!(id, "process component delete");
-        // TODO: TBD: stop component if spec deleted?
-        if self.components.write().await.get(id).is_some() {
-            warn!(
-                component_id = id,
-                "component spec deleted, but component is still running"
-            );
-        }
-        Ok(())
-    }
-
-    #[instrument(level = "debug", skip_all)]
-    pub(crate) async fn process_claims_put(
-        &self,
-        pubkey: impl AsRef<str>,
-        value: impl AsRef<[u8]>,
-    ) -> anyhow::Result<()> {
-        let pubkey = pubkey.as_ref();
-
-        debug!(pubkey, "process claim entry put");
-
-        let stored_claims: StoredClaims =
-            serde_json::from_slice(value.as_ref()).context("failed to decode stored claims")?;
-        let claims = Claims::from(stored_claims);
-
-        ensure!(claims.subject() == pubkey, "subject mismatch");
-        match claims {
-            Claims::Component(claims) => self.store_component_claims(claims).await,
-            Claims::Provider(claims) => {
-                let mut provider_claims = self.provider_claims.write().await;
-                provider_claims.insert(claims.subject.clone(), claims);
-                Ok(())
-            }
-        }
-    }
-
-    #[instrument(level = "debug", skip_all)]
-    pub(crate) async fn process_claims_delete(
-        &self,
-        pubkey: impl AsRef<str>,
-        value: impl AsRef<[u8]>,
-    ) -> anyhow::Result<()> {
-        let pubkey = pubkey.as_ref();
-
-        debug!(pubkey, "process claim entry deletion");
-
-        let stored_claims: StoredClaims =
-            serde_json::from_slice(value.as_ref()).context("failed to decode stored claims")?;
-        let claims = Claims::from(stored_claims);
-
-        ensure!(claims.subject() == pubkey, "subject mismatch");
-
-        match claims {
-            Claims::Component(claims) => {
-                let mut component_claims = self.component_claims.write().await;
-                component_claims.remove(&claims.subject);
-            }
-            Claims::Provider(claims) => {
-                let mut provider_claims = self.provider_claims.write().await;
-                provider_claims.remove(&claims.subject);
-            }
-        }
+        self.links
+            .write()
+            .await
+            .insert(id.as_ref().to_string(), spec.links.clone());
 
         Ok(())
     }

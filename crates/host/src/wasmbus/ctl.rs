@@ -834,6 +834,8 @@ impl ControlInterfaceServer for Host {
             // Update component specification with the new link
             self.store_component_spec(&source_id, &component_spec)
                 .await?;
+            self.update_host_with_spec(&source_id, &component_spec)
+                .await?;
 
             self.put_backwards_compat_provider_link(&request)
                 .await?;
@@ -905,6 +907,8 @@ impl ControlInterfaceServer for Host {
         if let Some(link) = deleted_link.as_ref() {
             // Update component specification with the deleted link
             self.store_component_spec(&source_id, &component_spec)
+                .await?;
+            self.update_host_with_spec(&source_id, &component_spec)
                 .await?;
 
             // Send the link to providers for deletion

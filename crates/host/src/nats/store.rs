@@ -2,14 +2,20 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{anyhow, Context as _};
+use anyhow::{anyhow, ensure, Context as _};
 use async_nats::jetstream::kv::{Entry as KvEntry, Operation, Store};
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
 use tokio::{sync::watch, task::JoinSet};
 use tracing::{debug, error, instrument, warn};
 
-use crate::store::StoreManager;
+use crate::{
+    store::StoreManager,
+    wasmbus::{
+        claims::{Claims, StoredClaims},
+        ComponentSpecification,
+    },
+};
 
 #[async_trait::async_trait]
 impl StoreManager for Store {
@@ -35,6 +41,10 @@ impl StoreManager for Store {
             .map_err(|err| anyhow::anyhow!("Failed to delete config: {}", err))
     }
 }
+
+// TODO(brooksmtownsend): This is a huge assumption that these values come from JetStream. We need to
+// be able to handle the case where the data store is not NATS
+// Basically I think we need to have the host not lean on implementations in the jetstream handling piece
 
 /// This is an extra implementation for the host to process entries coming from a JetStream bucket.
 impl crate::wasmbus::Host {
@@ -82,6 +92,80 @@ impl crate::wasmbus::Host {
         };
         if let Err(error) = &res {
             error!(key, ?operation, ?error, "failed to process KV bucket entry");
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) async fn process_component_spec_put(
+        &self,
+        id: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+    ) -> anyhow::Result<()> {
+        let id = id.as_ref();
+        debug!(id, "process component spec put");
+
+        let spec: ComponentSpecification = serde_json::from_slice(value.as_ref())
+            .context("failed to deserialize component specification")?;
+        self.update_host_with_spec(id, &spec)
+            .await
+            .context("failed to update component spec")?;
+
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) async fn process_component_spec_delete(
+        &self,
+        id: impl AsRef<str>,
+    ) -> anyhow::Result<()> {
+        debug!(id = id.as_ref(), "process component delete");
+        self.delete_component_spec(id).await
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    /// Process claims being put into the JetStream data store.
+    ///
+    /// Notably this updates the host map but does not call [Self::store_claims], which
+    /// would cause an infinite loop.
+    pub(crate) async fn process_claims_put(
+        &self,
+        pubkey: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+    ) -> anyhow::Result<()> {
+        let pubkey = pubkey.as_ref();
+
+        debug!(pubkey, "process claim entry put");
+
+        let stored_claims: StoredClaims =
+            serde_json::from_slice(value.as_ref()).context("failed to decode stored claims")?;
+        let claims = Claims::from(stored_claims);
+
+        ensure!(claims.subject() == pubkey, "subject mismatch");
+        match claims {
+            Claims::Component(claims) => self.store_component_claims(claims).await,
+            Claims::Provider(claims) => self.store_provider_claims(claims).await,
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) async fn process_claims_delete(
+        &self,
+        pubkey: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+    ) -> anyhow::Result<()> {
+        let pubkey = pubkey.as_ref();
+
+        debug!(pubkey, "process claim entry deletion");
+
+        let stored_claims: StoredClaims =
+            serde_json::from_slice(value.as_ref()).context("failed to decode stored claims")?;
+        let claims = Claims::from(stored_claims);
+
+        ensure!(claims.subject() == pubkey, "subject mismatch");
+
+        match claims {
+            Claims::Component(_) => self.delete_component_claims(pubkey).await,
+            Claims::Provider(_) => self.delete_provider_claims(pubkey).await,
         }
     }
 }

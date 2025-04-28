@@ -60,11 +60,11 @@ use crate::wasmbus::ctl::ControlInterfaceServer;
 use crate::workload_identity::WorkloadIdentityConfig;
 use crate::{fetch_component, PolicyManager, PolicyResponse, RegistryConfig, ResourceRef};
 
-mod claims;
+mod component_spec;
 mod experimental;
 mod handler;
-mod jetstream;
 
+pub(crate) mod claims;
 pub(crate) mod providers;
 
 /// Control interface implementation
@@ -78,7 +78,7 @@ pub mod host_config;
 
 pub use self::experimental::Features;
 pub use self::host_config::Host as HostConfig;
-pub use jetstream::ComponentSpecification;
+pub use component_spec::ComponentSpecification;
 pub use providers::ProviderManager;
 
 use self::config::{BundleGenerator, ConfigBundle};
@@ -775,6 +775,7 @@ impl HostBuilder {
         });
 
         let start_evt = json!({
+            "id": host.host_key.public_key(),
             "friendly_name": host.friendly_name,
             "labels": *host.labels.read().await,
             "uptime_seconds": 0,
@@ -1129,6 +1130,9 @@ impl Host {
             .unwrap_or_else(|| ComponentSpecification::new(&component_ref));
         self.store_component_spec(&component_id, &component_spec)
             .await?;
+        // TODO(brooksmtownsend): This will deadlock because of the way we hold a components lock.
+        // self.update_host_with_spec(&component_id, &component_spec)
+        //     .await?;
 
         // Map the imports to pull out the result types of the functions for lookup when invoking them
         let handler = Handler {
@@ -1198,16 +1202,6 @@ impl Host {
         )
         .await
         .context("failed to fetch component")
-    }
-
-    #[instrument(level = "trace", skip_all)]
-    async fn store_component_claims(
-        &self,
-        claims: jwt::Claims<jwt::Component>,
-    ) -> anyhow::Result<()> {
-        let mut component_claims = self.component_claims.write().await;
-        component_claims.insert(claims.subject.clone(), claims);
-        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -1659,6 +1653,8 @@ impl Host {
 
         self.store_component_spec(&provider_id, &component_specification)
             .await?;
+        self.update_host_with_spec(&provider_id, &component_specification)
+            .await?;
 
         let mut providers = self.providers.write().await;
         if let hash_map::Entry::Vacant(entry) = providers.entry(provider_id.into()) {
@@ -1866,7 +1862,8 @@ impl Host {
         <Self as ControlInterfaceServer>::handle_ping_hosts(self).await
     }
 
-    // TODO: Remove this before wasmCloud 1.2 is released. This is a backwards-compatible
+    // NOTE(brooksmtownsend): This is only necessary when running capability providers that were
+    // build for wasmCloud versions before 1.2. This is a backwards-compatible
     // provider link definition put that is published to the provider's id, which is what
     // providers built for wasmCloud 1.0 expected.
     //
@@ -1891,20 +1888,10 @@ impl Host {
             .resolve_link_config(link.clone(), None, None, &XKey::new())
             .await
             .context("failed to resolve link config")?;
-        // let lattice = &self.host_config.lattice;
-        // let payload: Bytes = serde_json::to_vec(&provider_link)
-        //     .context("failed to serialize provider link definition")?
-        //     .into();
 
         if let Err(e) = self
             .provider_manager
-            .put_link(
-                &provider_link,
-                link.source_id(),
-                // format!("wasmbus.rpc.{lattice}.{}.linkdefs.put", link.source_id()),
-                // injector_to_headers(&TraceContextInjector::default_with_span()),
-                // payload.clone(),
-            )
+            .put_link(&provider_link, link.source_id())
             .await
         {
             warn!(
