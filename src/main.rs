@@ -522,21 +522,8 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("failed to establish NATS control connection")?;
 
-    // TODO(brooksmtownsend): We could probs just push this into the builder
-    let rpc_nats = connect_nats(
-        rpc_nats_url.as_str(),
-        rpc_jwt.clone().or_else(|| nats_jwt.clone()).as_ref(),
-        rpc_key.clone().or_else(|| nats_key.clone()),
-        args.rpc_tls,
-        Some(args.rpc_timeout_ms),
-        workload_identity_config,
-    )
-    .await
-    .context("failed to establish NATS RPC connection")?;
-
     let builder = NatsHostBuilder::new(
         ctl_nats,
-        rpc_nats,
         Some(args.ctl_topic_prefix),
         args.lattice.clone(),
         args.js_domain.clone(),

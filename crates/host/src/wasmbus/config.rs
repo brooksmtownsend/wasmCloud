@@ -9,11 +9,31 @@ use tokio::sync::{
 };
 use tracing::{error, warn, Instrument};
 
-use crate::store::StoreManager;
+use crate::store::{DefaultStore, StoreManager};
 
 type LockedConfig = Arc<RwLock<HashMap<String, String>>>;
 /// A cache of named config mapped to an existing receiver
 type WatchCache = Arc<RwLock<HashMap<String, Receiver<HashMap<String, String>>>>>;
+
+#[async_trait::async_trait]
+/// A trait for managing a config store which can be watched to receive updates to the config
+pub trait ConfigManager: StoreManager {
+    /// Watches a config by name and returns a receiver that will be notified when the config changes
+    ///
+    /// The default implementation returns a receiver that will never receive any updates.
+    async fn watch(&self, name: &str) -> anyhow::Result<Receiver<HashMap<String, String>>> {
+        let config: HashMap<String, String> = match self.get(name).await {
+            Ok(Some(data)) => serde_json::from_slice(&data)
+                .context("Data corruption error, unable to decode data from store")?,
+            Ok(None) => return Err(anyhow::anyhow!("Config {} does not exist", name)),
+            Err(e) => return Err(anyhow::anyhow!("Error fetching config {}: {}", name, e)),
+        };
+        Ok(watch::channel(config).1)
+    }
+}
+
+/// A default implementation of the config manager that does not watch for updates
+impl ConfigManager for DefaultStore {}
 
 /// A struct used for mapping a config name to a receiver for logging/tracing purposes
 struct ConfigReceiver {
@@ -193,19 +213,19 @@ impl ConfigBundle {
 /// A struct used for generating a config bundle given a list of named configs
 #[derive(Clone)]
 pub struct BundleGenerator {
-    store: Arc<dyn StoreManager>,
+    store: Arc<dyn ConfigManager>,
     watch_cache: WatchCache,
-    watch_handles: Arc<RwLock<AbortHandles>>,
+    // watch_handles: Arc<RwLock<AbortHandles>>,
 }
 
 impl BundleGenerator {
     /// Create a new bundle generator
     #[must_use]
-    pub fn new(store: Arc<dyn StoreManager>) -> Self {
+    pub fn new(store: Arc<dyn ConfigManager>) -> Self {
         Self {
             store,
             watch_cache: Arc::default(),
-            watch_handles: Arc::default(),
+            // watch_handles: Arc::default(),
         }
     }
 
@@ -229,43 +249,36 @@ impl BundleGenerator {
             });
         }
 
-        // We need to actually try and fetch the config here. If we don't do this, then a watch will
-        // just blindly watch even if the key doesn't exist. We should return an error if the config
-        // doesn't exist or has data issues. It also allows us to set the initial value
-        let config: HashMap<String, String> = match self.store.get(&name).await {
-            Ok(Some(data)) => serde_json::from_slice(&data)
-                .context("Data corruption error, unable to decode data from store")?,
-            Ok(None) => return Err(anyhow::anyhow!("Config {} does not exist", name)),
-            Err(e) => return Err(anyhow::anyhow!("Error fetching config {}: {}", name, e)),
-        };
-
         // Otherwise we need to setup the watcher. We start by setting up the watch so we don't miss
         // any events after we query the initial config
-        let (_tx, rx) = watch::channel(config);
         // let (done, wait) = tokio::sync::oneshot::channel();
-        let (handle, _reg) = AbortHandle::new_pair();
-        // TODO(brooksmtownsend): re-enable
-        // tokio::task::spawn(Abortable::new(
-        //     watcher_loop(self.store.clone(), name.clone(), tx, done),
-        //     reg,
-        // ));
-
-        // wait.await
-        //     .context("Error waiting for watcher to start")?
-        //     .context("Error waiting for watcher to start")?;
+        // let (handle, reg) = AbortHandle::new_pair();
+        // TODO(brooksmtownsend): Setup way to abort
 
         // NOTE(thomastaylor312): We should probably find a way to clear out this cache. The Sender
         // part of the channel can tell you how many receivers it has, but we pass that along to the
         // watcher, so there would need to be more work to expose that, probably via a struct. We
         // could also do something with a resource counter and track that way with a cleanup task.
         // But for now going the easy route as we already cache everything anyway
-        self.watch_handles.write().await.handles.push(handle);
+        // self.watch_handles.write().await.handles.push(handle);
+        let receiver = self.watcher_loop(&name).await?;
         self.watch_cache
             .write()
             .await
-            .insert(name.clone(), rx.clone());
+            .insert(name.clone(), receiver.clone());
+        Ok(ConfigReceiver { name, receiver })
+    }
 
-        Ok(ConfigReceiver { name, receiver: rx })
+    pub(crate) async fn watcher_loop(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Receiver<HashMap<String, String>>> {
+        match self.store.watch(name).await {
+            Ok(watcher) => Ok(watcher),
+            Err(e) => {
+                bail!("error setting up watcher for {name}: {e}")
+            }
+        }
     }
 }
 

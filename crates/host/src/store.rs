@@ -18,7 +18,7 @@ pub trait StoreManager: Send + Sync {
     async fn del(&self, key: &str) -> anyhow::Result<()>;
 }
 
-/// A struct that implements the ConfigManager trait, storing data in an in-memory HashMap.
+/// A struct that implements the StoreManager trait, storing data in an in-memory HashMap.
 #[derive(Default)]
 pub struct DefaultStore {
     store: RwLock<HashMap<String, Bytes>>,

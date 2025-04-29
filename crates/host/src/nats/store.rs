@@ -6,13 +6,17 @@ use anyhow::{anyhow, ensure, Context as _};
 use async_nats::jetstream::kv::{Entry as KvEntry, Operation, Store};
 use bytes::Bytes;
 use futures::{StreamExt as _, TryStreamExt as _};
-use tokio::{sync::watch, task::JoinSet};
+use tokio::{
+    sync::watch::{self, Receiver},
+    task::JoinSet,
+};
 use tracing::{debug, error, instrument, warn};
 
 use crate::{
     store::StoreManager,
     wasmbus::{
         claims::{Claims, StoredClaims},
+        config::ConfigManager,
         ComponentSpecification,
     },
 };
@@ -42,9 +46,73 @@ impl StoreManager for Store {
     }
 }
 
-// TODO(brooksmtownsend): This is a huge assumption that these values come from JetStream. We need to
-// be able to handle the case where the data store is not NATS
-// Basically I think we need to have the host not lean on implementations in the jetstream handling piece
+#[async_trait::async_trait]
+impl ConfigManager for Store {
+    /// Watch the key in the JetStream bucket for changes. This will return a channel that will
+    /// receive updates to the config as they happen.
+    async fn watch(&self, name: &str) -> anyhow::Result<Receiver<HashMap<String, String>>> {
+        let config: HashMap<String, String> = match self.get(name).await {
+            Ok(Some(data)) => serde_json::from_slice(&data)
+                .context("Data corruption error, unable to decode data from store")?,
+            Ok(None) => return Err(anyhow::anyhow!("Config {} does not exist", name)),
+            Err(e) => return Err(anyhow::anyhow!("Error fetching config {}: {}", name, e)),
+        };
+
+        let (tx, rx) = watch::channel(config);
+        // Since we're starting a task, we need to own this data
+        let name = name.to_owned();
+        let mut watcher = self.watch(&name).await.context("Failed to watch config")?;
+
+        tokio::spawn(async move {
+            loop {
+                if tx.is_closed() {
+                    warn!(%name, "config watch channel closed, aborting watch");
+                    return;
+                }
+
+                match watcher.try_next().await {
+                    Ok(Some(entry))
+                        if matches!(entry.operation, Operation::Delete | Operation::Purge) =>
+                    {
+                        // NOTE(thomastaylor312): We should probably do something and notify something up
+                        // the chain if we get a delete or purge event of a config that is still being used.
+                        // For now we just zero it out
+                        tx.send_replace(HashMap::new());
+                    }
+                    Ok(Some(entry)) => {
+                        let config: HashMap<String, String> = match serde_json::from_slice(
+                            &entry.value,
+                        ) {
+                            Ok(config) => config,
+                            Err(e) => {
+                                error!(%name, error = %e, "Error decoding config from store during watch");
+                                continue;
+                            }
+                        };
+                        tx.send_if_modified(|current| {
+                            if current == &config {
+                                false
+                            } else {
+                                *current = config;
+                                true
+                            }
+                        });
+                    }
+                    Ok(None) => {
+                        error!(%name, "Watcher for config has closed");
+                        return;
+                    }
+                    Err(e) => {
+                        error!(%name, error = %e, "Error reading from watcher for config. Will wait for next entry");
+                        continue;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+}
 
 /// This is an extra implementation for the host to process entries coming from a JetStream bucket.
 impl crate::wasmbus::Host {
@@ -237,69 +305,4 @@ pub async fn data_watch(
     });
 
     Ok(())
-}
-
-//TODO(brooksmtownsend): Reinstate this
-#[allow(dead_code)]
-async fn watcher_loop(
-    store: Store,
-    name: String,
-    tx: watch::Sender<HashMap<String, String>>,
-    done: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-) {
-    // We need to watch with history so we can get the initial config.
-    let mut watcher = match store.watch(&name).await {
-        Ok(watcher) => {
-            done.send(Ok(())).expect(
-                "Receiver for watcher setup should not have been dropped. This is programmer error",
-            );
-            watcher
-        }
-        Err(e) => {
-            done.send(Err(anyhow::anyhow!(
-                "Error setting up watcher for {}: {}",
-                name,
-                e
-            )))
-            .expect(
-                "Receiver for watcher setup should not have been dropped. This is programmer error",
-            );
-            return;
-        }
-    };
-    loop {
-        match watcher.try_next().await {
-            Ok(Some(entry)) if matches!(entry.operation, Operation::Delete | Operation::Purge) => {
-                // NOTE(thomastaylor312): We should probably do something and notify something up
-                // the chain if we get a delete or purge event of a config that is still being used.
-                // For now we just zero it out
-                tx.send_replace(HashMap::new());
-            }
-            Ok(Some(entry)) => {
-                let config: HashMap<String, String> = match serde_json::from_slice(&entry.value) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        error!(%name, error = %e, "Error decoding config from store during watch");
-                        continue;
-                    }
-                };
-                tx.send_if_modified(|current| {
-                    if current == &config {
-                        false
-                    } else {
-                        *current = config;
-                        true
-                    }
-                });
-            }
-            Ok(None) => {
-                error!(%name, "Watcher for config has closed");
-                return;
-            }
-            Err(e) => {
-                error!(%name, error = %e, "Error reading from watcher for config. Will wait for next entry");
-                continue;
-            }
-        }
-    }
 }

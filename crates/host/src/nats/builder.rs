@@ -22,13 +22,13 @@ use crate::{
     registry::{merge_registry_config, RegistryCredentialExt as _, SupplementalConfig},
     secrets::SecretsManager,
     store::StoreManager,
-    wasmbus::{config::BundleGenerator, providers::ProviderManager, HostBuilder},
+    wasmbus::{config::BundleGenerator, HostBuilder},
     PolicyHostInfo, PolicyManager, WasmbusHostConfig,
 };
 
 const DEFAULT_CTL_TOPIC_PREFIX: &str = "wasmbus.ctl";
 
-use super::{create_bucket, ctl::NatsControlInterfaceServer, provider::NatsProviderManager};
+use super::{create_bucket, ctl::NatsControlInterfaceServer};
 
 /// Opinionated [crate::wasmbus::HostBuilder] that uses NATS as the primary transport and implementations
 /// for the [crate::wasmbus::Host] extension traits.
@@ -53,7 +53,6 @@ pub struct NatsHostBuilder {
     policy_manager: Option<Arc<dyn PolicyManager>>,
     secrets_manager: Option<Arc<dyn SecretsManager>>,
     event_publisher: Option<Arc<dyn EventPublisher>>,
-    provider_manager: Arc<dyn ProviderManager>,
 }
 
 impl NatsHostBuilder {
@@ -61,7 +60,6 @@ impl NatsHostBuilder {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         ctl_nats: Client,
-        rpc_nats: Client,
         ctl_topic_prefix: Option<String>,
         lattice: String,
         js_domain: Option<String>,
@@ -97,8 +95,6 @@ impl NatsHostBuilder {
         // TODO(brooksmtownsend): figure this out where go
         let config_generator = BundleGenerator::new(Arc::new(config_data.clone()));
 
-        let provider_manager = NatsProviderManager::new(rpc_nats.clone(), lattice.clone());
-
         Ok(Self {
             ctl_nats,
             ctl_topic_prefix: ctl_topic_prefix
@@ -108,7 +104,6 @@ impl NatsHostBuilder {
             registry_config,
             config_store: Arc::new(config_data),
             data_store,
-            provider_manager: Arc::new(provider_manager),
             policy_manager: None,
             secrets_manager: None,
             event_publisher: None,
@@ -191,8 +186,7 @@ impl NatsHostBuilder {
                 .with_secrets_manager(self.secrets_manager)
                 .with_bundle_generator(Some(self.config_generator))
                 .with_config_store(Some(self.config_store))
-                .with_data_store(Some(Arc::new(self.data_store.clone())))
-                .with_provider_manager(Some(self.provider_manager)),
+                .with_data_store(Some(Arc::new(self.data_store.clone()))),
             NatsControlInterfaceServer::new(
                 self.ctl_nats,
                 self.data_store,

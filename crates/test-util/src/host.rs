@@ -120,7 +120,6 @@ impl WasmCloudTestHost {
 
         let nats_builder = wasmcloud_host::nats::builder::NatsHostBuilder::new(
             nats_client.clone(),
-            nats_client,
             None,
             lattice_name.into(),
             None,

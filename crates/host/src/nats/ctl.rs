@@ -339,6 +339,7 @@ impl NatsControlInterfaceServer {
                                 let msg_reply = msg.reply.clone();
                                 let payload = host.handle_ctl_message(msg).await;
                                 if let Some(reply) = msg_reply {
+                                    // TODO(brooksmtownsend): parse subject here
                                     // TODO(brooksmtownsend): ensure this is instrumented properly
                                     let headers = injector_to_headers(&TraceContextInjector::default_with_span());
                                     if let Some(payload) = payload {

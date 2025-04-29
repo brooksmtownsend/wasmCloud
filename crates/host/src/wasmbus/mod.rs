@@ -53,6 +53,7 @@ use wasmcloud_tracing::{global, InstrumentationScope, KeyValue};
 use crate::event::{DefaultEventPublisher, EventPublisher};
 use crate::metrics::HostMetrics;
 use crate::nats::connect_nats;
+use crate::nats::provider::NatsProviderManager;
 use crate::policy::DefaultPolicyManager;
 use crate::secrets::{DefaultSecretsManager, SecretsManager};
 use crate::store::{DefaultStore, StoreManager};
@@ -399,8 +400,6 @@ pub struct HostBuilder {
     policy_manager: Option<Arc<dyn PolicyManager>>,
     /// The secrets manager to use for managing secrets
     secrets_manager: Option<Arc<dyn SecretsManager>>,
-    /// The provider manager to use for managing providers
-    provider_manager: Option<Arc<dyn ProviderManager>>,
 }
 
 impl HostBuilder {
@@ -496,14 +495,6 @@ impl HostBuilder {
         }
     }
 
-    /// Initialize the host with the given provider manager for managing providers
-    pub fn with_provider_manager(self, provider_manager: Option<Arc<dyn ProviderManager>>) -> Self {
-        Self {
-            provider_manager,
-            ..self
-        }
-    }
-
     /// Build a new [Host] instance with the given configuration
     #[instrument(level = "debug", skip_all)]
     pub async fn build(
@@ -545,16 +536,18 @@ impl HostBuilder {
             rpc_nats_url = self.config.rpc_nats_url.as_str(),
             "connecting to NATS RPC server"
         );
-        let rpc_nats = connect_nats(
-            self.config.rpc_nats_url.as_str(),
-            self.config.rpc_jwt.as_ref(),
-            self.config.rpc_key.clone(),
-            self.config.rpc_tls,
-            Some(self.config.rpc_timeout),
-            workload_identity_config.clone(),
-        )
-        .await
-        .context("failed to establish NATS RPC server connection")?;
+        let rpc_nats = Arc::new(
+            connect_nats(
+                self.config.rpc_nats_url.as_str(),
+                self.config.rpc_jwt.as_ref(),
+                self.config.rpc_key.clone(),
+                self.config.rpc_tls,
+                Some(self.config.rpc_timeout),
+                workload_identity_config.clone(),
+            )
+            .await
+            .context("failed to establish NATS RPC server connection")?,
+        );
 
         let (stop_tx, stop_rx) = watch::channel(None);
 
@@ -691,12 +684,10 @@ impl HostBuilder {
             provider_claims: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(metrics),
             max_execution_time: self.config.max_execution_time,
-            // TODO(brooksmtownsend): Why store entire config if we only need certain fields?
-            host_config: self.config,
             messaging_links: Arc::default(),
             ready: Arc::clone(&ready),
             tasks,
-            rpc_nats: Arc::new(rpc_nats),
+            rpc_nats: Arc::clone(&rpc_nats),
             registry_config: RwLock::new(self.registry_config),
             // Extension traits that we fallback to defaults for
             event_publisher: self
@@ -714,14 +705,16 @@ impl HostBuilder {
             config_store: self
                 .config_store
                 .unwrap_or_else(|| Arc::new(DefaultStore::default())),
-            // TODO(brooksmtownsend): We should actually get the real config bundle generator once it's traitified
             config_generator: self
                 .bundle_generator
                 .unwrap_or_else(|| BundleGenerator::new(Arc::new(DefaultStore::default()))),
-            // TODO(brooksmtownsend): what's the default? Only builtins?
-            provider_manager: self
-                .provider_manager
-                .expect("only provider manager to be present"), // .unwrap_or_else(|| Arc::new(DefaultProviderManager::new())),
+            // TODO(brooksmtownsend): We should have one for builtins, and a generic one.
+            // For now, because of coupling, keep it simple with NATS
+            provider_manager: Arc::new(NatsProviderManager::new(
+                rpc_nats,
+                self.config.lattice.to_string(),
+            )),
+            host_config: self.config,
         };
 
         let host = Arc::new(host);
