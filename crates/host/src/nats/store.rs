@@ -13,10 +13,10 @@ use tokio::{
 use tracing::{debug, error, instrument, warn};
 
 use crate::{
+    config::ConfigManager,
     store::StoreManager,
     wasmbus::{
         claims::{Claims, StoredClaims},
-        config::ConfigManager,
         ComponentSpecification,
     },
 };

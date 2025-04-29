@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
+#[cfg(target_family = "windows")]
+use anyhow::{bail, Result};
+#[cfg(unix)]
 use anyhow::{Context as _, Result};
+#[cfg(unix)]
 use nkeys::KeyPair;
 
 // TODO(joonas): Figure out better naming here
