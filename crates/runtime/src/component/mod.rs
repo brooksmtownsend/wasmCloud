@@ -107,6 +107,11 @@ pub trait InvocationErrorIntrospect {
     fn invocation_error_kind(&self, err: &anyhow::Error) -> InvocationErrorKind;
 }
 
+/// The minimal handler trait
+pub trait MinimalHandler: Send + Sync + Clone + 'static {}
+
+impl<T: Send + Sync + Clone + 'static> MinimalHandler for T {}
+
 /// A collection of traits that the host must implement
 pub trait Handler:
     wrpc_transport::Invoke<Context = Option<ReplacedInstanceTarget>>
@@ -182,7 +187,7 @@ pub fn claims_token(wasm: impl AsRef<[u8]>) -> anyhow::Result<Option<jwt::Token<
 #[derive(Clone)]
 pub struct Component<H>
 where
-    H: Handler,
+    H: MinimalHandler,
 {
     engine: wasmtime::Engine,
     claims: Option<jwt::Claims<jwt::Component>>,
@@ -192,9 +197,120 @@ where
     experimental_features: Features,
 }
 
+/// Pre-compiled component [Component], which is cheapily-[Cloneable](Clone)
+#[derive(Clone)]
+pub struct CustomCtxComponent<C>
+where
+    C: BaseCtx,
+{
+    engine: wasmtime::Engine,
+    claims: Option<jwt::Claims<jwt::Component>>,
+    instance_pre: wasmtime::component::InstancePre<C>,
+    host_resources: Arc<HashMap<Box<str>, HashMap<Box<str>, (ResourceType, ResourceType)>>>,
+    max_execution_time: Duration,
+    experimental_features: Features,
+}
+
+impl<C> CustomCtxComponent<C>
+where
+    C: BaseCtx,
+{
+    /// Compiles a WebAssembly component and compiles it using [Runtime].
+    ///
+    /// Modules are not supported with this function
+    ///
+    /// It is expected that the `linker_fn` is used to link any and all imports to the component. If
+    /// not, then the instantiation of the instance will fail.
+    #[instrument(level = "trace", skip_all)]
+    pub fn new_with_linker_minimal(
+        rt: &Runtime,
+        wasm: &[u8],
+        linker_fn: impl FnOnce(&mut Linker<C>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        if wasmparser::Parser::is_core_wasm(wasm) {
+            anyhow::bail!("No core modules supported like this");
+        }
+        let engine = rt.engine.clone();
+        let claims = None;
+        let component = wasmtime::component::Component::new(&engine, wasm)
+            .context("failed to compile component")?;
+
+        let mut linker = Linker::new(&engine);
+        linker_fn(&mut linker)?;
+
+        let ty = component.component_type();
+        let mut guest_resources = Vec::new();
+        let mut host_resources = BTreeMap::new();
+        collect_component_resource_exports(&engine, &ty, &mut guest_resources);
+        collect_component_resource_imports(&engine, &ty, &mut host_resources);
+
+        let host_resources = host_resources
+            .into_iter()
+            .map(|(name, instance)| {
+                let instance = instance
+                    .into_iter()
+                    .map(|(name, ty)| (name, (ty, ResourceType::host::<RemoteResource>())))
+                    .collect::<HashMap<_, _>>();
+                (name, instance)
+            })
+            .collect::<HashMap<_, _>>();
+        let host_resources = Arc::from(host_resources);
+
+        // if !guest_resources.is_empty() {
+        //     warn!("exported component resources are not supported in wasmCloud runtime and will be ignored, use a provider instead to enable this functionality");
+        // }
+
+        let instance_pre = linker
+            .instantiate_pre(&component)
+            .context("failed to pre-instantiate component")?;
+
+        Ok(CustomCtxComponent {
+            engine,
+            claims,
+            instance_pre,
+            host_resources,
+            max_execution_time: rt.max_execution_time,
+            experimental_features: rt.experimental_features,
+        })
+    }
+
+    /// Creates a new component store for instantiation
+    pub fn new_store(&self, base_ctx: C) -> wasmtime::Store<C> {
+        // TODO: deduplicate with new_store below
+        let table = ResourceTable::new();
+        let wasi = WasiCtxBuilder::new()
+            .args(&["main.wasm"]) // TODO: Configure argv[0]
+            .inherit_stderr()
+            .build();
+
+        // TOOD: add table/wasi? Construct from? idk
+
+        let mut store = wasmtime::Store::new(
+            &self.engine,
+            // Ctx {
+            //     handler,
+            //     wasi,
+            //     http: WasiHttpCtx::new(),
+            //     table,
+            //     shared_resources: SharedResourceTable::default(),
+            //     timeout: self.max_execution_time,
+            //     parent_context: None,
+            // },
+            base_ctx,
+        );
+        store.set_epoch_deadline(self.max_execution_time.as_secs());
+        store
+    }
+
+    /// Returns the precompiled component instance
+    pub fn instance_pre(&self) -> &wasmtime::component::InstancePre<C> {
+        &self.instance_pre
+    }
+}
+
 impl<H> Debug for Component<H>
 where
-    H: Handler,
+    H: MinimalHandler,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Component")
@@ -202,6 +318,38 @@ where
             .field("runtime", &"wasmtime")
             .field("max_execution_time", &self.max_execution_time)
             .finish_non_exhaustive()
+    }
+}
+
+impl<H: MinimalHandler> Component<H> {
+    /// Creates a new component store for instantiation
+    pub fn new_store(&self, handler: H) -> wasmtime::Store<Ctx<H>> {
+        // TODO: deduplicate with new_store below
+        let table = ResourceTable::new();
+        let wasi = WasiCtxBuilder::new()
+            .args(&["main.wasm"]) // TODO: Configure argv[0]
+            .inherit_stderr()
+            .build();
+
+        let mut store = wasmtime::Store::new(
+            &self.engine,
+            Ctx {
+                handler,
+                wasi,
+                http: WasiHttpCtx::new(),
+                table,
+                shared_resources: SharedResourceTable::default(),
+                timeout: self.max_execution_time,
+                parent_context: None,
+            },
+        );
+        store.set_epoch_deadline(self.max_execution_time.as_secs());
+        store
+    }
+
+    /// Returns the precompiled component instance
+    pub fn instance_pre(&self) -> &wasmtime::component::InstancePre<Ctx<H>> {
+        &self.instance_pre
     }
 }
 
@@ -273,6 +421,70 @@ pub type InvocationStream = Pin<
 
 impl<H> Component<H>
 where
+    H: MinimalHandler,
+{
+    /// Compiles a WebAssembly component and compiles it using [Runtime].
+    ///
+    /// Modules are not supported with this function
+    ///
+    /// It is expected that the `linker_fn` is used to link any and all imports to the component. If
+    /// not, then the instantiation of the instance will fail.
+    #[instrument(level = "trace", skip_all)]
+    pub fn new_with_linker_minimal(
+        rt: &Runtime,
+        wasm: &[u8],
+        linker_fn: impl FnOnce(&mut Linker<Ctx<H>>) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        if wasmparser::Parser::is_core_wasm(wasm) {
+            anyhow::bail!("No core modules supported like this");
+        }
+        let engine = rt.engine.clone();
+        let claims = None;
+        let component = wasmtime::component::Component::new(&engine, wasm)
+            .context("failed to compile component")?;
+
+        let mut linker = Linker::new(&engine);
+        linker_fn(&mut linker)?;
+
+        let ty = component.component_type();
+        let mut guest_resources = Vec::new();
+        let mut host_resources = BTreeMap::new();
+        collect_component_resource_exports(&engine, &ty, &mut guest_resources);
+        collect_component_resource_imports(&engine, &ty, &mut host_resources);
+
+        let host_resources = host_resources
+            .into_iter()
+            .map(|(name, instance)| {
+                let instance = instance
+                    .into_iter()
+                    .map(|(name, ty)| (name, (ty, ResourceType::host::<RemoteResource>())))
+                    .collect::<HashMap<_, _>>();
+                (name, instance)
+            })
+            .collect::<HashMap<_, _>>();
+        let host_resources = Arc::from(host_resources);
+
+        // if !guest_resources.is_empty() {
+        //     warn!("exported component resources are not supported in wasmCloud runtime and will be ignored, use a provider instead to enable this functionality");
+        // }
+
+        let instance_pre = linker
+            .instantiate_pre(&component)
+            .context("failed to pre-instantiate component")?;
+
+        Ok(Component {
+            engine,
+            claims,
+            instance_pre,
+            host_resources,
+            max_execution_time: rt.max_execution_time,
+            experimental_features: rt.experimental_features,
+        })
+    }
+}
+
+impl<H> Component<H>
+where
     H: Handler,
 {
     /// Extracts [Claims](jwt::Claims) from WebAssembly component and compiles it using [Runtime].
@@ -280,8 +492,71 @@ where
     /// If `wasm` represents a core Wasm module, then it will first be turned into a component.
     #[instrument(level = "trace", skip_all)]
     pub fn new(rt: &Runtime, wasm: &[u8]) -> anyhow::Result<Self> {
-        Self::new_with_linker(rt, wasm, |_| Ok(()))
+        Self::new_with_linker(rt, wasm, |linker| {
+            wasmtime_wasi::add_to_linker_async(linker)
+                .context("failed to link core WASI interfaces")?;
+            wasmtime_wasi_http::add_only_http_to_linker_async(linker)
+                .context("failed to link `wasi:http`")?;
+
+            capability::blobstore::blobstore::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:blobstore/blobstore`")?;
+            capability::blobstore::container::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:blobstore/container`")?;
+            capability::blobstore::types::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:blobstore/types`")?;
+            capability::config::runtime::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:config/runtime`")?;
+            capability::config::store::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:config/store`")?;
+            capability::keyvalue::atomics::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:keyvalue/atomics`")?;
+            capability::keyvalue::store::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:keyvalue/store`")?;
+            capability::keyvalue::batch::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:keyvalue/batch`")?;
+            capability::logging::logging::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasi:logging/logging`")?;
+            capability::unversioned_logging::logging::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link unversioned `wasi:logging/logging`")?;
+
+            capability::bus1_0_0::lattice::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:bus/lattice@1.0.0`")?;
+            capability::bus2_0_1::lattice::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:bus/lattice@2.0.1`")?;
+            capability::bus2_0_1::error::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:bus/error@2.0.1`")?;
+            capability::messaging0_2_0::types::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:messaging/types@0.2.0`")?;
+            capability::messaging0_2_0::consumer::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:messaging/consumer@0.2.0`")?;
+            capability::secrets::reveal::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:secrets/reveal`")?;
+            capability::secrets::store::add_to_linker(linker, |ctx| ctx)
+                .context("failed to link `wasmcloud:secrets/store`")?;
+            // Only link wasmcloud:messaging@v3 if the feature is enabled
+            if rt.experimental_features.wasmcloud_messaging_v3 {
+                capability::messaging0_3_0::types::add_to_linker(linker, |ctx| ctx)
+                    .context("failed to link `wasmcloud:messaging/types@0.3.0`")?;
+                capability::messaging0_3_0::producer::add_to_linker(linker, |ctx| ctx)
+                    .context("failed to link `wasmcloud:messaging/producer@0.3.0`")?;
+                capability::messaging0_3_0::request_reply::add_to_linker(linker, |ctx| ctx)
+                    .context("failed to link `wasmcloud:messaging/request-reply@0.3.0`")?;
+            }
+            // Only link wasmcloud:identity if the workload identity feature is enabled
+            if rt.experimental_features.workload_identity_interface {
+                capability::identity::store::add_to_linker(linker, |ctx| ctx)
+                    .context("failed to link `wasmcloud:identity/store`")?;
+            }
+
+            // Only link wrpc:rpc if the RPC feature is enabled
+            if rt.experimental_features.rpc_interface {
+                rpc::add_to_linker(linker).context("failed to link `wrpc:rpc`")?;
+            }
+
+            Ok(())
+        })
     }
+
     /// Extracts [Claims](jwt::Claims) from WebAssembly component and compiles it using [Runtime].
     /// The `linker_fn` is used to link additional interfaces to the component.
     ///
@@ -313,67 +588,7 @@ where
 
         let mut linker = Linker::new(&engine);
 
-        wasmtime_wasi::add_to_linker_async(&mut linker)
-            .context("failed to link core WASI interfaces")?;
-        wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)
-            .context("failed to link `wasi:http`")?;
-
         linker_fn(&mut linker)?;
-
-        capability::blobstore::blobstore::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:blobstore/blobstore`")?;
-        capability::blobstore::container::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:blobstore/container`")?;
-        capability::blobstore::types::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:blobstore/types`")?;
-        capability::config::runtime::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:config/runtime`")?;
-        capability::config::store::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:config/store`")?;
-        capability::keyvalue::atomics::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:keyvalue/atomics`")?;
-        capability::keyvalue::store::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:keyvalue/store`")?;
-        capability::keyvalue::batch::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:keyvalue/batch`")?;
-        capability::logging::logging::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasi:logging/logging`")?;
-        capability::unversioned_logging::logging::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link unversioned `wasi:logging/logging`")?;
-
-        capability::bus1_0_0::lattice::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:bus/lattice@1.0.0`")?;
-        capability::bus2_0_1::lattice::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:bus/lattice@2.0.1`")?;
-        capability::bus2_0_1::error::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:bus/error@2.0.1`")?;
-        capability::messaging0_2_0::types::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:messaging/types@0.2.0`")?;
-        capability::messaging0_2_0::consumer::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:messaging/consumer@0.2.0`")?;
-        capability::secrets::reveal::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:secrets/reveal`")?;
-        capability::secrets::store::add_to_linker(&mut linker, |ctx| ctx)
-            .context("failed to link `wasmcloud:secrets/store`")?;
-        // Only link wasmcloud:messaging@v3 if the feature is enabled
-        if rt.experimental_features.wasmcloud_messaging_v3 {
-            capability::messaging0_3_0::types::add_to_linker(&mut linker, |ctx| ctx)
-                .context("failed to link `wasmcloud:messaging/types@0.3.0`")?;
-            capability::messaging0_3_0::producer::add_to_linker(&mut linker, |ctx| ctx)
-                .context("failed to link `wasmcloud:messaging/producer@0.3.0`")?;
-            capability::messaging0_3_0::request_reply::add_to_linker(&mut linker, |ctx| ctx)
-                .context("failed to link `wasmcloud:messaging/request-reply@0.3.0`")?;
-        }
-        // Only link wasmcloud:identity if the workload identity feature is enabled
-        if rt.experimental_features.workload_identity_interface {
-            capability::identity::store::add_to_linker(&mut linker, |ctx| ctx)
-                .context("failed to link `wasmcloud:identity/store`")?;
-        }
-
-        // Only link wrpc:rpc if the RPC feature is enabled
-        if rt.experimental_features.rpc_interface {
-            rpc::add_to_linker(&mut linker).context("failed to link `wrpc:rpc`")?;
-        }
 
         let ty = component.component_type();
         let mut guest_resources = Vec::new();
@@ -848,13 +1063,33 @@ where
 
 type TableResult<T> = Result<T, ResourceTableError>;
 
+pub trait RuntimeCtx: BaseCtx + WasiView + IoView + WrpcView + Debug {
+    fn table(&mut self) -> &mut ResourceTable;
+}
+
+pub trait BaseCtx: Debug {
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+    fn parent_context(&self) -> Option<&opentelemetry::Context> {
+        None
+    }
+}
+
+// RuntimeCtx which requires a context that impls many traits for running in wasmCloud
+// BaseCtx which is literally only what we need to run the component
+
+// In wash we impl parts of these but not the WRPC bits
+// The impls in this crate are for the entire RuntimeCtx
+
 /// Wasmtime Context for a component instance, with access to
 /// WASI context, HTTP context, and WRPC Invocation context.
 /// This is a low-level API and has to be paired with `Component::new_with_linker`.
 pub struct Ctx<H>
 where
-    H: Handler,
+    H: MinimalHandler,
 {
+    // TODO: accessor
     handler: H,
     wasi: WasiCtx,
     http: WasiHttpCtx,
@@ -864,13 +1099,20 @@ where
     parent_context: Option<opentelemetry::Context>,
 }
 
-impl<H: Handler> IoView for Ctx<H> {
+impl<H: MinimalHandler> Ctx<H> {
+    /// Borrow the handler of this context
+    pub fn handler_mut(&mut self) -> &mut H {
+        &mut self.handler
+    }
+}
+
+impl<H: MinimalHandler> IoView for Ctx<H> {
     fn table(&mut self) -> &mut ResourceTable {
         &mut self.table
     }
 }
 
-impl<H: Handler> WasiView for Ctx<H> {
+impl<H: MinimalHandler> WasiView for Ctx<H> {
     fn ctx(&mut self) -> &mut WasiCtx {
         &mut self.wasi
     }
@@ -896,13 +1138,13 @@ impl<H: Handler> WrpcView for Ctx<H> {
     }
 }
 
-impl<H: Handler> Debug for Ctx<H> {
+impl<H: MinimalHandler> Debug for Ctx<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ctx").field("runtime", &"wasmtime").finish()
     }
 }
 
-impl<H: Handler> Ctx<H> {
+impl<H: MinimalHandler> Ctx<H> {
     fn attach_parent_context(&self) {
         if let Some(context) = self.parent_context.as_ref() {
             Span::current().set_parent(context.clone());
