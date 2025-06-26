@@ -43,9 +43,6 @@ jobs:
               - 'crates/secrets-types/**'
               - 'crates/tracing/**'
               - 'crates/wash/**'
-              - '!crates/**/*.md'
-              - '!crates/wash/.devcontainer'
-              - '!**'  # Exclude everything else not already matched above
       - name: Changed files
         run: |
           echo "Changed file(s) (${{ steps.changes.outputs.changed_count }})"
