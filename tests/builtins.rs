@@ -41,6 +41,7 @@ const BUILTIN_MESSAGING_NATS: &str = "wasmcloud+builtin://messaging-nats";
 /// properly handling de-registering and re-registering links.
 #[instrument(skip_all, ret)]
 #[tokio::test]
+/// AHHAHSDHASH
 async fn builtin_http_path_routing() -> anyhow::Result<()> {
     _ = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().compact().without_time())
